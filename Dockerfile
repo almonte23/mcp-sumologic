@@ -29,12 +29,13 @@ RUN npm pkg delete scripts.prepare && \
 
 # Copy built files from builder stage
 COPY --from=builder /app/dist ./dist
-
-# Copy .env file if it exists
 COPY --from=builder /app/.env ./.env
 
 # Set environment variables
 ENV NODE_ENV=production
+ENV PORT=3006
+
+EXPOSE 3006
 
 # Start the application
-CMD ["node", "dist/index.js"] 
+CMD ["node", "dist/index.js"]

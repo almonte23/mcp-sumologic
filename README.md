@@ -12,7 +12,7 @@ A Model Context Protocol (MCP) server that integrates with Sumo Logic's API to p
 ## Environment Variables
 
 ```env
-ENDPOINT=https://api.au.sumologic.com/api/v1  # Sumo Logic API endpoint
+ENDPOINT=https://{host}/api/v1  # Sumo Logic API endpoint
 SUMO_API_ID=your_api_id                       # Sumo Logic API ID
 SUMO_API_KEY=your_api_key                     # Sumo Logic API Key
 ```
@@ -70,7 +70,7 @@ The server exposes a `search-sumologic` tool that accepts the following paramete
 
 Example query:
 ```typescript
-const query = '_index=app_pro_fiat_cont | json auto | fields log_identifier';
+const query = '_index={index} | json auto | fields log_identifier';
 const results = await search(sumoClient, query, {
   from: '2024-02-23T00:00:00Z',
   to: '2024-02-24T00:00:00Z',

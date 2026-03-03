@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  mcp-sumologic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-sumologic
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+    ports:
+      - '3006:3006'
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
