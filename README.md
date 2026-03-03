@@ -94,4 +94,22 @@ npm run dev
 For testing:
 ```bash
 npm test
-``` 
+```
+
+## Makefile
+
+Common tasks are available via `make`:
+
+| Command              | Description                                  |
+|----------------------|----------------------------------------------|
+| `make install`       | Install dependencies                         |
+| `make build`         | Build the project                            |
+| `make start`         | Start the server                             |
+| `make dev`           | Start in development mode (auto-reload)      |
+| `make clean`         | Remove `dist/` and `node_modules/`           |
+| `make lint`          | Run ESLint                                   |
+| `make test`          | Run tests                                    |
+| `make docker-build`  | Build Docker image                           |
+| `make docker-run`    | Run container with `.env` file on port 3006  |
+| `make docker-compose`| Start services via Docker Compose            |
+| `make docker-down`   | Stop Docker Compose services                 | 
