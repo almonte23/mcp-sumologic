@@ -20,13 +20,16 @@ export async function search(
   query: string,
   timeRange?: { from?: string; to?: string },
 ): Promise<SearchResult> {
-  const now = moment();
   const defaultTimeRange = {
-    from: now.subtract(1, 'day').format(),
-    to: now.format(),
+    from: moment().subtract(1, 'day').toISOString(true).slice(0, 19),
+    to: moment().toISOString(true).slice(0, 19),
   };
 
-  const { from, to } = { ...defaultTimeRange, ...timeRange };
+  const { from, to } = {
+    ...defaultTimeRange,
+    ...(timeRange?.from && { from: timeRange.from }),
+    ...(timeRange?.to && { to: timeRange.to }),
+  };
 
   // Create search job
   const jobParams = {
@@ -131,8 +134,7 @@ export async function search(
       messages: sanitizedMessages,
     };
   } catch (error) {
-    return {
-      messages: [],
-    };
+    console.error('Sumo Logic search error:', error);
+    throw error;
   }
 }
