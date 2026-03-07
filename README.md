@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/samwang0723-mcp-sumologic-badge.png)](https://mseep.ai/app/samwang0723-mcp-sumologic)
+
 # MCP Sumo Logic
 
 A Model Context Protocol (MCP) server that integrates with Sumo Logic's API to perform log searches.
