@@ -1,6 +1,7 @@
 import { config } from 'dotenv';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import express from 'express';
 import { randomUUID } from 'node:crypto';
@@ -78,7 +79,18 @@ function createServer(): McpServer {
   return server;
 }
 
+async function runStdioServer() {
+  const server = createServer();
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
 async function runServer() {
+  if (process.env.MCP_TRANSPORT === 'stdio') {
+    await runStdioServer();
+    return;
+  }
+
   const app = express();
   app.use(express.json());
 
