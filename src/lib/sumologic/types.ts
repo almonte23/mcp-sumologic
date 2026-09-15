@@ -68,6 +68,10 @@ export interface IJobOptions {
   from: string;
   to: string;
   timeZone: string;
+  // Search by message arrival time instead of message timestamp.
+  byReceiptTime?: boolean;
+  // 'AutoParse' enables dynamic JSON field extraction; 'Manual' (default) does not.
+  autoParsingMode?: 'AutoParse' | 'Manual';
 }
 
 export interface IHttpCallOptions {

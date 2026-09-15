@@ -67,11 +67,38 @@ function createServer(): McpServer {
         .string()
         .optional()
         .describe('End of the time range as an ISO 8601 timestamp. Defaults to now.'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10000)
+        .optional()
+        .describe('Maximum number of rows to return (1–10000). Defaults to 100.'),
+      byReceiptTime: z
+        .boolean()
+        .optional()
+        .describe(
+          'Search by the time logs were received rather than their own timestamp. ' +
+            'Useful for finding logs during ingestion delays.',
+        ),
+      autoParsingMode: z
+        .enum(['AutoParse', 'Manual'])
+        .optional()
+        .describe(
+          'Set to "AutoParse" to automatically extract fields from structured ' +
+            '(JSON) logs. Defaults to "Manual" (no auto extraction).',
+        ),
     },
-    async ({ query, from, to }) => {
+    async ({ query, from, to, limit, byReceiptTime, autoParsingMode }) => {
       try {
         const cleanedQuery = query.replace(/\n/g, '');
-        const results = await search(sumoClient, cleanedQuery, { from, to });
+        const results = await search(sumoClient, cleanedQuery, {
+          from,
+          to,
+          limit,
+          byReceiptTime,
+          autoParsingMode,
+        });
 
         return {
           content: [

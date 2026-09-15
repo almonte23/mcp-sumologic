@@ -39,8 +39,8 @@ src/
 
 ### Request Flow
 
-1. **MCP entry** (`index.ts`): Express receives MCP requests at `/mcp`, manages session-based transports. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps.
-2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until `DONE GATHERING RESULTS`, fetches messages, deletes the job. Default time range is last 24 hours, timezone `Asia/Hong_Kong`.
+1. **MCP entry** (`index.ts`): Express receives MCP requests at `/mcp`, manages session-based transports. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps, optional `limit` (1–10000, default 100), optional `byReceiptTime` (search by arrival time), and optional `autoParsingMode` (`AutoParse`/`Manual`).
+2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until a terminal state (`DONE GATHERING RESULTS`/`FORCE PAUSED`; throws on `CANCELLED` or a 5-minute timeout), then fetches results and deletes the job. Aggregate queries (detected via `recordCount > 0`) return `records`; other queries return `messages`. The result carries a `type` field ("messages" | "records"), `fields`, and the matching rows. Default time range is last 24 hours, timezone `Asia/Hong_Kong`.
 3. **HTTP client** (`lib/sumologic/client.ts`): Wraps `request-promise-native` with basic auth. Methods: `job()`, `status()`, `messages()`, `records()`, `delete()`.
 4. **PII filtering** (`utils/pii.ts`): Applied only to `_raw` and `response` fields in search results. Redacts emails, credit cards, phone numbers, addresses, SSNs.
 

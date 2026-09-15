@@ -16,6 +16,23 @@ export interface SearchResult {
 
 // Sumo Logic caps a single results page at 10000 rows.
 const MAX_ROWS = 10000;
+// Default number of rows to return when the caller doesn't specify a limit.
+const DEFAULT_LIMIT = 100;
+// Poll the job status at this interval until it reaches a terminal state.
+const POLL_INTERVAL_MS = 1000;
+// Give up waiting for a job after this long so a stuck job can't hang forever.
+const MAX_POLL_MS = 5 * 60 * 1000;
+
+export interface SearchOptions {
+  from?: string;
+  to?: string;
+  // Max rows to return (1–10000). Defaults to 100.
+  limit?: number;
+  // Search by message arrival (receipt) time rather than message timestamp.
+  byReceiptTime?: boolean;
+  // 'AutoParse' extracts JSON fields automatically; 'Manual' (default) does not.
+  autoParsingMode?: 'AutoParse' | 'Manual';
+}
 
 // Only these fields can contain PII worth masking.
 function sanitizeRow(row: any): any {
@@ -75,7 +92,7 @@ interface SumoAPIError {
 export async function search(
   client: Sumo.Client,
   query: string,
-  timeRange?: { from?: string; to?: string },
+  options: SearchOptions = {},
 ): Promise<SearchResult> {
   const defaultTimeRange = {
     from: moment().subtract(1, 'day').toISOString(true).slice(0, 19),
@@ -84,33 +101,57 @@ export async function search(
 
   const { from, to } = {
     ...defaultTimeRange,
-    ...(timeRange?.from && { from: timeRange.from }),
-    ...(timeRange?.to && { to: timeRange.to }),
+    ...(options.from && { from: options.from }),
+    ...(options.to && { to: options.to }),
   };
 
+  const limit = Math.min(Math.max(options.limit ?? DEFAULT_LIMIT, 1), MAX_ROWS);
+
   // Create search job
-  const jobParams = {
+  const jobParams: Sumo.IJobOptions = {
     query,
     from,
     to,
     timeZone: 'Asia/Hong_Kong',
+    ...(options.byReceiptTime !== undefined && {
+      byReceiptTime: options.byReceiptTime,
+    }),
+    ...(options.autoParsingMode && { autoParsingMode: options.autoParsingMode }),
   };
 
   try {
     const { id } = await client.job(jobParams);
 
-    // Wait for job completion
+    // Wait for the job to reach a terminal state. A job may also end in
+    // CANCELLED, and 'FORCE PAUSED' means results are ready (a non-aggregate
+    // query hit its 100K cap) — so treat both done states as complete. Guard
+    // with a timeout so a stuck job can't spin this loop forever.
+    const doneStates = ['DONE GATHERING RESULTS', 'FORCE PAUSED'];
+    const startedAt = Date.now();
     let status;
     do {
-      try {
-        status = await client.status(id);
-        if (status.state !== 'DONE GATHERING RESULTS') {
-          await new Promise((resolve) => setTimeout(resolve, 1000)); // Wait 1 second
-        }
-      } catch (statusError) {
-        throw statusError;
+      status = await client.status(id);
+
+      if (status.state === 'CANCELLED') {
+        await Promise.resolve(client.delete(id)).catch(() => undefined);
+        throw new Error('Sumo Logic search job was cancelled');
       }
-    } while (status.state !== 'DONE GATHERING RESULTS');
+
+      if (doneStates.includes(status.state)) {
+        break;
+      }
+
+      if (Date.now() - startedAt > MAX_POLL_MS) {
+        await Promise.resolve(client.delete(id)).catch(() => undefined);
+        throw new Error(
+          `Sumo Logic search job did not complete within ${
+            MAX_POLL_MS / 1000
+          }s (last state: ${status.state})`,
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    } while (true);
 
     // Aggregate queries (count/sum/avg/by/timeslice/...) produce records rather
     // than raw messages. Sumo Logic reports how many of each the job produced,
@@ -118,8 +159,10 @@ export async function search(
     const isAggregate = (status.recordCount ?? 0) > 0;
 
     if (isAggregate) {
-      const limit = Math.min(status.recordCount, MAX_ROWS);
-      const records = await client.records(id, { offset: 0, limit });
+      const records = await client.records(id, {
+        offset: 0,
+        limit: Math.min(status.recordCount, limit),
+      });
 
       // Cleanup
       await client.delete(id);
@@ -132,7 +175,7 @@ export async function search(
     }
 
     // Non-aggregate search: return the raw log messages.
-    const messages = await client.messages(id);
+    const messages = await client.messages(id, { offset: 0, limit });
 
     // Cleanup
     await client.delete(id);
