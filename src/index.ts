@@ -44,10 +44,29 @@ function createServer(): McpServer {
 
   server.tool(
     'search_sumologic',
+    'Run a Sumo Logic log search and return the results. ' +
+      'Supports BOTH non-aggregate searches (raw log messages) and aggregate ' +
+      'queries. Aggregate queries use operators such as `count`, `count_distinct`, ' +
+      '`sum`, `avg`, `min`, `max`, `pct`, `by`, and `timeslice` ' +
+      '(e.g. `_sourceCategory=prod/api | timeslice 1h | count by _timeslice`). ' +
+      'The response includes a `type` field: "messages" for raw searches or ' +
+      '"records" for aggregate results, with the rows under the matching key and ' +
+      'column definitions under `fields`.',
     {
-      query: z.string(),
-      from: z.string().optional(),
-      to: z.string().optional(),
+      query: z
+        .string()
+        .describe(
+          'Sumo Logic search query. Aggregate operators (count, sum, avg, by, ' +
+            'timeslice, etc.) are fully supported and return aggregated records.',
+        ),
+      from: z
+        .string()
+        .optional()
+        .describe('Start of the time range as an ISO 8601 timestamp. Defaults to 24 hours ago.'),
+      to: z
+        .string()
+        .optional()
+        .describe('End of the time range as an ISO 8601 timestamp. Defaults to now.'),
     },
     async ({ query, from, to }) => {
       try {
