@@ -209,7 +209,7 @@ async function runServer() {
     res.json({
       status: 'ok',
       service: 'mcp-sumologic',
-      version: '1.0.0',
+      version: '1.5.0',
       enabled_tools: ['search_sumologic'],
     });
   });
