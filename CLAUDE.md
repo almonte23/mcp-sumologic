@@ -39,8 +39,8 @@ src/
 
 ### Request Flow
 
-1. **MCP entry** (`index.ts`): Express receives MCP requests at `/mcp`, manages session-based transports. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps, optional `limit` (1–10000, default 100), optional `byReceiptTime` (search by arrival time), and optional `autoParsingMode` (`AutoParse`/`Manual`).
-2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until a terminal state (`DONE GATHERING RESULTS`/`FORCE PAUSED`; throws on `CANCELLED` or a 5-minute timeout), then fetches results and deletes the job. Aggregate queries (detected via `recordCount > 0`) return `records`; other queries return `messages`. The result carries a `type` field ("messages" | "records"), `fields`, and the matching rows. Default time range is last 24 hours, timezone `Asia/Hong_Kong`.
+1. **MCP entry** (`index.ts`): Serves MCP over Streamable HTTP at `/mcp` (session-based transports), or over stdio when `MCP_TRANSPORT=stdio`. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps, optional `timeZone` (IANA, default UTC), `limit` (1–100000, default 100), `byReceiptTime`, `bySearchableTime`, `autoParsingMode` (`AutoParse`/`Manual`), `requiresRawMessages`, `includeHistogram`, and `allowLargeResult`.
+2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until a terminal state (`DONE GATHERING RESULTS`/`FORCE PAUSED`; throws on `CANCELLED` or a 5-minute timeout), then fetches results and deletes the job. Aggregate queries return `records`, other queries return `messages`; detection is `recordCount > 0` OR the query containing an aggregate operator, so a zero-result aggregate still returns `records` instead of erroring on the messages endpoint. Results beyond a 10000 row page are paginated up to `limit` (raw messages capped at 2000 unless `allowLargeResult`). `requiresRawMessages` adds the raw lines behind an aggregate; `includeHistogram` adds volume buckets. Transient failures (429, 5xx) retry with backoff. Default time range is last 24 hours, timezone UTC.
 3. **HTTP client** (`lib/sumologic/client.ts`): Wraps `request-promise-native` with basic auth. Methods: `job()`, `status()`, `messages()`, `records()`, `delete()`.
 4. **PII filtering** (`utils/pii.ts`): Applied only to `_raw` and `response` fields in search results. Redacts emails, credit cards, phone numbers, addresses, SSNs.
 
@@ -48,7 +48,7 @@ src/
 
 - **ESM modules**: `"type": "module"` in package.json — all imports use `.js` extensions
 - **Path aliases**: `@/*` maps to `src/*` (tsconfig paths + `tsc-alias` for build, `tsx` handles in dev)
-- **Transport**: Streamable HTTP (not stdio) — each session gets its own `StreamableHTTPServerTransport` instance keyed by session ID
+- **Transport**: Streamable HTTP by default (each session gets its own `StreamableHTTPServerTransport` keyed by session ID), or stdio when `MCP_TRANSPORT=stdio` (used by clients that spawn the process)
 - **Health endpoint**: `GET /health` returns service status and enabled tools
 
 ## Environment Variables

@@ -62,24 +62,46 @@ function createServer(): McpServer {
       from: z
         .string()
         .optional()
-        .describe('Start of the time range as an ISO 8601 timestamp. Defaults to 24 hours ago.'),
+        .describe(
+          'Start of the time range as an ISO 8601 timestamp. Interpreted in ' +
+            '`timeZone` (UTC by default) when it carries no offset. Defaults to 24 hours ago.',
+        ),
       to: z
         .string()
         .optional()
-        .describe('End of the time range as an ISO 8601 timestamp. Defaults to now.'),
+        .describe(
+          'End of the time range as an ISO 8601 timestamp. Interpreted in ' +
+            '`timeZone` (UTC by default) when it carries no offset. Defaults to now.',
+        ),
+      timeZone: z
+        .string()
+        .optional()
+        .describe(
+          'IANA time zone (e.g. "UTC", "America/New_York") used to interpret ' +
+            '`from`/`to` when they have no explicit offset. Defaults to UTC.',
+        ),
       limit: z
         .number()
         .int()
         .min(1)
-        .max(10000)
+        .max(100000)
         .optional()
-        .describe('Maximum number of rows to return (1–10000). Defaults to 100.'),
+        .describe(
+          'Maximum number of rows to return (1–100000). Defaults to 100. Rows ' +
+            'beyond a single 10000 row page are fetched by paginating.',
+        ),
       byReceiptTime: z
         .boolean()
         .optional()
         .describe(
           'Search by the time logs were received rather than their own timestamp. ' +
             'Useful for finding logs during ingestion delays.',
+        ),
+      bySearchableTime: z
+        .boolean()
+        .optional()
+        .describe(
+          'Search by indexed (searchable) time rather than the message timestamp.',
         ),
       autoParsingMode: z
         .enum(['AutoParse', 'Manual'])
@@ -88,8 +110,42 @@ function createServer(): McpServer {
           'Set to "AutoParse" to automatically extract fields from structured ' +
             '(JSON) logs. Defaults to "Manual" (no auto extraction).',
         ),
+      requiresRawMessages: z
+        .boolean()
+        .optional()
+        .describe(
+          'For aggregate queries, also return the raw log messages behind the ' +
+            'aggregation (under `messages`) instead of only the aggregated `records`.',
+        ),
+      includeHistogram: z
+        .boolean()
+        .optional()
+        .describe(
+          'Also return volume-over-time histogram buckets for the search under ' +
+            '`histogram`.',
+        ),
+      allowLargeResult: z
+        .boolean()
+        .optional()
+        .describe(
+          'Return more than 2000 raw messages. Off by default because a very ' +
+            'large raw payload can drop the connection; prefer an aggregate ' +
+            'query for big result sets. Does not affect aggregate records.',
+        ),
     },
-    async ({ query, from, to, limit, byReceiptTime, autoParsingMode }) => {
+    async ({
+      query,
+      from,
+      to,
+      limit,
+      byReceiptTime,
+      bySearchableTime,
+      autoParsingMode,
+      requiresRawMessages,
+      includeHistogram,
+      allowLargeResult,
+      timeZone,
+    }) => {
       try {
         const cleanedQuery = query.replace(/\n/g, '');
         const results = await search(sumoClient, cleanedQuery, {
@@ -97,7 +153,12 @@ function createServer(): McpServer {
           to,
           limit,
           byReceiptTime,
+          bySearchableTime,
           autoParsingMode,
+          requiresRawMessages,
+          includeHistogram,
+          allowLargeResult,
+          timeZone,
         });
 
         return {
