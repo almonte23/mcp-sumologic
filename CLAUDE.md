@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-MCP server for Sumo Logic log searches. Exposes a `search_sumologic` tool via the Model Context Protocol over Streamable HTTP transport (Express server on port 3006).
+MCP server for Sumo Logic log searches. Exposes `search_sumologic` plus read-only analysis and discovery tools (`sumologic_*`, registered in `src/tools.ts`) via the Model Context Protocol over Streamable HTTP transport (Express server on port 3006). Primary consumers are AI skills (debug-with-telemetry, optimize-with-telemetry, picasso), so results must make failure, truncation and partial data explicit.
 
 ## Commands
 
@@ -13,7 +13,7 @@ npm install          # Install dependencies
 npm run build        # Compile TypeScript (tsc + tsc-alias for path aliases)
 npm start            # Run compiled server from dist/
 npm run dev          # Dev mode with nodemon + tsx (auto-reload)
-npm test             # Run Jest tests
+npm test             # Run tests (node:test via tsx, Sumo faked in test/fakeSumo.ts)
 npm run lint         # ESLint
 npm run lint:fix     # ESLint with auto-fix
 npm run format       # Prettier format
@@ -29,19 +29,31 @@ docker-compose up --build -d
 
 ```
 src/
-├── index.ts                      # Express server + MCP setup (Streamable HTTP transport)
-├── domains/sumologic/client.ts   # Search orchestration (job → poll → messages → cleanup)
+├── index.ts                      # Express server + MCP setup, search_sumologic registration
+├── tools.ts                      # Registration of the sumologic_* tools
+├── instructions.ts               # Server instructions sent to MCP clients at initialize
+├── domains/sumologic/
+│   ├── client.ts                 # Search orchestration (job → poll → messages → cleanup) + meta
+│   ├── analytics.ts              # timeline, compareWindows, discoverValues (built on search)
+│   ├── catalog.ts                # Management API reads (partitions, fields, health, monitors, ...)
+│   ├── errors.ts                 # Error classification + tool error formatting
+│   └── links.ts                  # Sumo UI search links
 ├── lib/sumologic/
-│   ├── client.ts                 # Sumo Logic HTTP client (Search Job API wrapper)
+│   ├── client.ts                 # Sumo Logic HTTP client (Search Job API + generic GET/POST)
+│   ├── limiter.ts                # Process-wide rate limiter (4 req/s, 10 in flight)
 │   └── types.ts                  # TypeScript interfaces for Sumo Logic API
-└── utils/pii.ts                  # PII masking (email, phone, CC, SSN, address)
+├── utils/
+│   ├── pii.ts                    # PII masking (email, phone, CC, SSN, address)
+│   └── time.ts                   # Time parsing: ISO/offset/epoch/relative, zones, windows
+└── docs/sumologic-api-1.0.0.yaml # Sumo Logic OpenAPI spec (reference for new endpoints)
 ```
 
 ### Request Flow
 
-1. **MCP entry** (`index.ts`): Serves MCP over Streamable HTTP at `/mcp` (session-based transports), or over stdio when `MCP_TRANSPORT=stdio`. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps, optional `timeZone` (IANA, default UTC), `limit` (1–100000, default 100), `byReceiptTime`, `bySearchableTime`, `autoParsingMode` (`AutoParse`/`Manual`), `requiresRawMessages`, `includeHistogram`, and `allowLargeResult`.
-2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until a terminal state (`DONE GATHERING RESULTS`/`FORCE PAUSED`; throws on `CANCELLED` or a 5-minute timeout), then fetches results and deletes the job. Aggregate queries return `records`, other queries return `messages`; detection is `recordCount > 0` OR the query containing an aggregate operator, so a zero-result aggregate still returns `records` instead of erroring on the messages endpoint. Results beyond a 10000 row page are paginated up to `limit` (raw messages capped at 2000 unless `allowLargeResult`). `requiresRawMessages` adds the raw lines behind an aggregate; `includeHistogram` adds volume buckets. Transient failures (429, 5xx) retry with backoff. Default time range is last 24 hours, timezone UTC.
-3. **HTTP client** (`lib/sumologic/client.ts`): Wraps `request-promise-native` with basic auth. Methods: `job()`, `status()`, `messages()`, `records()`, `delete()`.
+1. **MCP entry** (`index.ts`): Serves MCP over Streamable HTTP at `/mcp` (session-based transports), or over stdio when `MCP_TRANSPORT=stdio`. The `search_sumologic` tool accepts `query`, optional `from`/`to` ISO timestamps, optional `timeZone` (IANA, default UTC), `limit` (1–100000, default 100), `byReceiptTime`, `bySearchableTime`, `autoParsingMode` (`AutoParse`/`Manual`), `requiresRawMessages`, `includeHistogram`, `allowLargeResult`, `around`/`aroundMinutes`, and `returnFields`. Errors are returned with `isError: true` and a classified kind (`formatToolError`).
+2. **Search orchestration** (`domains/sumologic/client.ts`): Creates a Sumo Logic search job, polls status until a terminal state (`DONE GATHERING RESULTS`/`FORCE PAUSED`; throws on `CANCELLED` or a 5-minute timeout), then fetches results and deletes the job. Aggregate queries return `records`, other queries return `messages`; detection is `recordCount > 0` OR the query containing an aggregate operator, so a zero-result aggregate still returns `records` instead of erroring on the messages endpoint. Results beyond a 10000 row page are paginated up to `limit` (raw messages capped at 2000 unless `allowLargeResult`). `requiresRawMessages` adds the raw lines behind an aggregate; `includeHistogram` adds volume buckets. Transient failures (429, 5xx, socket errors) retry with backoff. Default time range is last 24 hours (sent as epoch millis), timezone UTC. Wall-clock ISO `from`/`to` without an offset pass through unchanged; relative, epoch and offset times are sent as epoch millis. Each search uses its own cookie jar (`client.withSession()`) because Search Job API jobs are pinned to their session cookie. Every result carries `meta` (jobId, window, totals vs returned, truncated, completeness, accumulated pendingWarnings/pendingErrors, UI link).
+3. **HTTP client** (`lib/sumologic/client.ts`): Wraps `request-promise-native` with basic auth, a 120s request timeout, and the shared rate limiter. Methods: `job()`, `status()`, `messages()`, `records()`, `delete()`, `getJson()`, `postJson()`, `withSession()`.
+5. **Analysis/catalog tools** (`analytics.ts`, `catalog.ts`): `timeline` appends `| timeslice | count by _timeslice` to a non-aggregate query and zero-fills buckets; `compareWindows` runs timelines for the window and shifted baselines and applies the spike/drop rule; catalog functions are thin, trimmed reads over management endpoints from the OpenAPI spec.
 4. **PII filtering** (`utils/pii.ts`): Applied only to `_raw` and `response` fields in search results. Redacts emails, credit cards, phone numbers, addresses, SSNs.
 
 ### Key Technical Details
@@ -58,3 +70,5 @@ Required in `.env`:
 - `SUMO_API_ID` — API access ID
 - `SUMO_API_KEY` — API access key
 - `PORT` — Server port (default: 3006)
+
+Optional: `SUMO_SEARCH_TIMEOUT_MS` (default 300000), `SUMO_MAX_REQUESTS_PER_SECOND` (4), `SUMO_MAX_IN_FLIGHT` (10), `SUMO_UI_URL` (UI link base, derived from ENDPOINT; `off` disables).

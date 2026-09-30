@@ -7,7 +7,13 @@ import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { search } from '@/domains/sumologic/client.js';
+import { formatToolError } from '@/domains/sumologic/errors.js';
 import * as Sumo from '@/lib/sumologic/client.js';
+import { SERVER_INSTRUCTIONS } from '@/instructions.js';
+import { aroundParams, EXTRA_TOOLS, registerExtraTools } from '@/tools.js';
+
+const VERSION = '1.6.0';
+const ENABLED_TOOLS = ['search_sumologic', ...EXTRA_TOOLS];
 
 // Load environment variables from .env file
 config();
@@ -37,10 +43,13 @@ const safeStringify = (obj: any) => {
 };
 
 function createServer(): McpServer {
-  const server = new McpServer({
-    name: 'mcp-sumologic',
-    version: '1.0.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'mcp-sumologic',
+      version: VERSION,
+    },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
 
   server.tool(
     'search_sumologic',
@@ -51,7 +60,10 @@ function createServer(): McpServer {
       '(e.g. `_sourceCategory=prod/api | timeslice 1h | count by _timeslice`). ' +
       'The response includes a `type` field: "messages" for raw searches or ' +
       '"records" for aggregate results, with the rows under the matching key and ' +
-      'column definitions under `fields`.',
+      'column definitions under `fields`. Every response also carries `meta` ' +
+      '(jobId, resolved window, totals vs returned, truncated, completeness, ' +
+      'Sumo warnings/errors, UI link); check `meta.completeness` before ' +
+      'concluding that an empty result means nothing happened.',
     {
       query: z
         .string()
@@ -64,15 +76,19 @@ function createServer(): McpServer {
         .optional()
         .describe(
           'Start of the time range as an ISO 8601 timestamp. Interpreted in ' +
-            '`timeZone` (UTC by default) when it carries no offset. Defaults to 24 hours ago.',
+            '`timeZone` (UTC by default) when it carries no offset. Also accepts ' +
+            'epoch millis or a relative time such as "-15m", "-24h", "-60d". ' +
+            'Defaults to 24 hours ago.',
         ),
       to: z
         .string()
         .optional()
         .describe(
           'End of the time range as an ISO 8601 timestamp. Interpreted in ' +
-            '`timeZone` (UTC by default) when it carries no offset. Defaults to now.',
+            '`timeZone` (UTC by default) when it carries no offset. Also accepts ' +
+            'epoch millis, "now", or a relative time. Defaults to now.',
         ),
+      ...aroundParams,
       timeZone: z
         .string()
         .optional()
@@ -132,7 +148,15 @@ function createServer(): McpServer {
             'large raw payload can drop the connection; prefer an aggregate ' +
             'query for big result sets. Does not affect aggregate records.',
         ),
+      returnFields: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Keep only these keys in each row `map` (case-insensitive) to shrink ' +
+            'the payload, e.g. ["_messagetime", "_sourcecategory", "_raw"].',
+        ),
     },
+    { readOnlyHint: true, openWorldHint: true },
     async ({
       query,
       from,
@@ -145,6 +169,9 @@ function createServer(): McpServer {
       includeHistogram,
       allowLargeResult,
       timeZone,
+      around,
+      aroundMinutes,
+      returnFields,
     }) => {
       try {
         const cleanedQuery = query.replace(/\n/g, '');
@@ -159,6 +186,9 @@ function createServer(): McpServer {
           includeHistogram,
           allowLargeResult,
           timeZone,
+          around,
+          aroundMinutes,
+          returnFields,
         });
 
         return {
@@ -170,18 +200,20 @@ function createServer(): McpServer {
           ],
         };
       } catch (err) {
-        const error = err instanceof Error ? err : new Error('Unknown error');
         return {
+          isError: true,
           content: [
             {
               type: 'text',
-              text: `Error: ${error.message}`,
+              text: formatToolError(err),
             },
           ],
         };
       }
     },
   );
+
+  registerExtraTools(server, sumoClient);
 
   return server;
 }
@@ -209,8 +241,8 @@ async function runServer() {
     res.json({
       status: 'ok',
       service: 'mcp-sumologic',
-      version: '1.5.0',
-      enabled_tools: ['search_sumologic'],
+      version: VERSION,
+      enabled_tools: ENABLED_TOOLS,
     });
   });
 

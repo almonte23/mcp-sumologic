@@ -29,6 +29,9 @@ export interface IStatus {
   pendingErrors: Error[];
   pendingWarnings: Warning[];
   recordCount: number;
+  // Not always present; surfaced verbatim when Sumo returns them.
+  warning?: string;
+  usageDetails?: { dataScannedInBytes?: number };
 }
 
 export interface IField {
@@ -65,8 +68,9 @@ export interface IClientOptions {
 
 export interface IJobOptions {
   query: string;
-  from: string;
-  to: string;
+  // ISO 8601 wall-clock time (interpreted in `timeZone`) or epoch millis.
+  from: string | number;
+  to: string | number;
   timeZone: string;
   // Search by message arrival time instead of message timestamp.
   byReceiptTime?: boolean;
