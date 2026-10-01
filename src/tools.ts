@@ -17,6 +17,7 @@ import {
   searchMonitors,
 } from '@/domains/sumologic/catalog.js';
 import { formatToolError } from '@/domains/sumologic/errors.js';
+import { toJsonText } from '@/utils/json.js';
 
 export const EXTRA_TOOLS = [
   'sumologic_timeline',
@@ -89,9 +90,7 @@ const respond =
     try {
       const result = await fn(args);
       return {
-        content: [
-          { type: 'text' as const, text: JSON.stringify(result, null, 2) },
-        ],
+        content: [{ type: 'text' as const, text: toJsonText(result) }],
       };
     } catch (err) {
       return {

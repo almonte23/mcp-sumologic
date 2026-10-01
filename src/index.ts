@@ -11,8 +11,9 @@ import { formatToolError } from '@/domains/sumologic/errors.js';
 import * as Sumo from '@/lib/sumologic/client.js';
 import { SERVER_INSTRUCTIONS } from '@/instructions.js';
 import { aroundParams, EXTRA_TOOLS, registerExtraTools } from '@/tools.js';
+import { toJsonText } from '@/utils/json.js';
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const ENABLED_TOOLS = ['search_sumologic', ...EXTRA_TOOLS];
 
 // Load environment variables from .env file
@@ -23,24 +24,6 @@ const sumoClient = Sumo.client({
   sumoApiId: process.env.SUMO_API_ID || '',
   sumoApiKey: process.env.SUMO_API_KEY || '',
 });
-
-// Safely stringify objects, handling potential circular references
-const safeStringify = (obj: any) => {
-  const seen = new WeakSet();
-  return JSON.stringify(
-    obj,
-    (key, value) => {
-      if (typeof value === 'object' && value !== null) {
-        if (seen.has(value)) {
-          return '[Circular Reference]';
-        }
-        seen.add(value);
-      }
-      return value;
-    },
-    2,
-  );
-};
 
 function createServer(): McpServer {
   const server = new McpServer(
@@ -152,7 +135,8 @@ function createServer(): McpServer {
         .array(z.string())
         .optional()
         .describe(
-          'Keep only these keys in each row `map` (case-insensitive) to shrink ' +
+          'Keep only these keys in each row `map` and in `fields` ' +
+            '(case-insensitive) to shrink ' +
             'the payload, e.g. ["_messagetime", "_sourcecategory", "_raw"].',
         ),
     },
@@ -195,7 +179,7 @@ function createServer(): McpServer {
           content: [
             {
               type: 'text',
-              text: safeStringify(results),
+              text: toJsonText(results),
             },
           ],
         };
@@ -338,12 +322,13 @@ runServer().catch((error) => {
   process.exit(1);
 });
 
+// stderr, because in stdio mode stdout carries only MCP protocol messages.
 process.on('SIGINT', async () => {
-  console.log('Shutting down Sumologic MCP server...');
+  console.error('Shutting down Sumologic MCP server...');
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('Shutting down Sumologic MCP server...');
+  console.error('Shutting down Sumologic MCP server...');
   process.exit(0);
 });

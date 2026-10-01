@@ -37,6 +37,7 @@ Optional:
 | Variable | Default | Purpose |
 |---|---|---|
 | `SUMO_SEARCH_TIMEOUT_MS` | `300000` | How long a search job may run before giving up. Raise for long lookbacks. |
+| `SUMO_MESSAGE_CAP` | `200000` | Raw messages Sumo gathers before it stops. At or above this, `totalsAreLowerBound` is set. Change only if Sumo changes its cap. |
 | `SUMO_MAX_REQUESTS_PER_SECOND` | `4` | Client-side pacing of Sumo API calls. |
 | `SUMO_MAX_IN_FLIGHT` | `10` | Max concurrent Sumo API calls. |
 | `SUMO_UI_URL` | derived from `ENDPOINT` | Base URL for UI links in `meta.links.ui` (e.g. `https://service.us2.sumologic.com`). `off` disables links. |
@@ -99,7 +100,7 @@ The server exposes a `search_sumologic` tool. The response always carries a `typ
 | `query` | string, required | Sumo Logic search query. Aggregate operators (`count`, `sum`, `avg`, `by`, `timeslice`, ...) are supported and return `records`. |
 | `from` | string, optional | Start time: ISO 8601 (interpreted in `timeZone` when it has no offset), epoch millis, or relative (`-15m`, `-24h`, `-60d`). Defaults to 24 hours ago. |
 | `to` | string, optional | End time, same formats plus `now`. Defaults to now. |
-| `around` | string, optional | Center the window on this instant instead of `from`/`to`. |
+| `around` | string, optional | Center the window on this instant instead of `from`/`to`. Raw messages are read from the event's position, not the newest end of the window. If Sumo's cap stops it before the event, the search retries once with a narrower window (`partialReasons` then includes `narrowedWindow`). |
 | `aroundMinutes` | number, optional | Half-width of the `around` window. Defaults to 5 (±5 min). |
 | `timeZone` | string, optional | IANA time zone for `from`/`to` when they carry no offset. Defaults to `UTC`. |
 | `limit` | int, optional | Max rows to return (1–100000). Defaults to 100. Rows beyond a single 10000 row page are paginated. Raw messages are capped (see `allowLargeResult`). |
@@ -107,9 +108,9 @@ The server exposes a `search_sumologic` tool. The response always carries a `typ
 | `bySearchableTime` | bool, optional | Search by indexed (searchable) time rather than message timestamp. |
 | `autoParsingMode` | `AutoParse` \| `Manual`, optional | `AutoParse` auto-extracts fields from JSON logs (including nested, e.g. `payload.status`). Defaults to `Manual`. |
 | `requiresRawMessages` | bool, optional | For aggregate queries, also return the raw messages behind the aggregation under `messages` (one job instead of two). |
-| `includeHistogram` | bool, optional | Also return volume-over-time buckets under `histogram`. |
+| `includeHistogram` | bool, optional | Also return volume-over-time buckets under `histogram`. On a capped search, empty buckets older than the gathered messages are dropped (they were never searched). |
 | `allowLargeResult` | bool, optional | Return more than 2000 raw messages. Off by default because a large raw payload can drop the connection. Aggregate records are never capped. |
-| `returnFields` | string[], optional | Keep only these keys in each row `map` (case-insensitive), e.g. `["_messagetime", "_sourcecategory", "_raw"]`. |
+| `returnFields` | string[], optional | Keep only these keys in each row `map` and in `fields` (case-insensitive), e.g. `["_messagetime", "_sourcecategory", "_raw"]`. |
 
 ### Response `meta`
 
@@ -122,9 +123,12 @@ Every `search_sumologic` response includes a `meta` object alongside the existin
   "window": { "from": "2026-09-29T21:00:00.000Z", "to": "...", "timeZone": "UTC", "timeBasis": "messageTime" },
   "state": "DONE GATHERING RESULTS",
   "totals":   { "messages": 5432, "records": 0 },   // what Sumo matched
+  "totalsAreLowerBound": false,           // true when Sumo stopped counting at its cap
   "returned": { "messages": 100,  "records": 0 },   // what this response carries
+  "returnedSpan": { "newest": "2026-09-29T21:59:58.120Z", "oldest": "2026-09-29T21:59:41.003Z" }, // raw messages only
   "truncated": true,
   "completeness": "partial",              // "complete" only with no truncation, warnings, errors or FORCE PAUSED
+  "partialReasons": ["limit"],            // limit | rawMessageCap | sumoCap | sumoWarning | sumoError | narrowedWindow
   "warnings": [], "errors": [],
   "elapsedMs": 2140,
   "links": { "ui": "https://service.sumologic.com/ui/#/search/create?query=..." }

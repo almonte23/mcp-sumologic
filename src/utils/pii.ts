@@ -1,3 +1,105 @@
+// Logs are full of numbers that are not PII: epoch timestamps, decimals,
+// durations, IPs, hostnames, AWS account ids, ARNs and hex ids. Every numeric
+// pattern below therefore refuses to start right after a word character or a
+// decimal point, and refuses to end right before one.
+const START = String.raw`(?<![\w.])`;
+const END = String.raw`(?!\w|\.\d)`;
+
+const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+
+// Quoted values of secret-looking keys, in plain or escaped JSON
+// (`"password":"x"` or `\"password\":\"x\"`) and in key=value form.
+const SECRET_JSON =
+  /(\\?"[\w-]*(?:password|passwd|secret|token|api[_-]?key|authorization|private[_-]?key|access[_-]?key)[\w-]*\\?"\s*:\s*\\?")((?:[^"\\]|\\(?!"))*)(\\?")/gi;
+const SECRET_PAIR =
+  /\b([\w-]*(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|access[_-]?key)[\w-]*=)([^\s&"',;]+)/gi;
+
+// The end user's IP address, found only under client IP keys. Infrastructure
+// IPs (hosts, _sourcehost, service URLs) are kept for debugging.
+const CLIENT_IP_KEYS =
+  'http_remote_address|remote_ip|remote_addr|client_ip|x[-_]forwarded[-_]for|ip';
+const IP = String.raw`(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]*:[0-9a-f:]+)`;
+const CLIENT_IP_JSON = new RegExp(
+  `(\\\\?"(?:${CLIENT_IP_KEYS})\\\\?"\\s*:\\s*\\\\?")([^"\\\\]+)(\\\\?")`,
+  'gi',
+);
+const CLIENT_IP_PAIR = new RegExp(
+  `\\b((?:${CLIENT_IP_KEYS})\\s*[:=]\\s*)${IP}(?:\\s*,\\s*${IP})*`,
+  'gi',
+);
+
+// Twilio account SID: half of a Twilio credential pair. Call and conference
+// SIDs are kept because they are how calls are traced across systems.
+const TWILIO_ACCOUNT_SID = /\bAC[0-9a-f]{32}\b/g;
+
+// 13 to 19 digits, optionally split by single spaces or hyphens. Matches are
+// only redacted when they start like a real card and pass the Luhn check.
+const CARD = new RegExp(`${START}\\d(?:[ -]?\\d){12,18}${END}`, 'g');
+
+const SSN = /(?<![\w.-])\d{3}-\d{2}-\d{4}(?![\w-])/g;
+
+const PHONE_PATTERNS = [
+  // E.164, e.g. +15551234567. Matched on its own first so a following number
+  // ("+15551234567 123") is not pulled into the match.
+  new RegExp(`(?<![\\w.])\\+\\d{8,15}${END}`, 'g'),
+  // International with separators, e.g. +44 20 7946 0958, +1 (555) 123-4567.
+  new RegExp(`(?<![\\w.])\\+\\d{1,3}(?:[ .-]\\(?\\d{1,4}\\)?){2,5}${END}`, 'g'),
+  // North American with separators, e.g. (555) 123-4567, 555-123-4567,
+  // 1-555-123-4567. Bare digit runs are not matched: they are almost always
+  // timestamps or ids.
+  new RegExp(
+    `${START}(?:1[ .-]?)?(?:\\(\\d{3}\\)\\s?|\\d{3}[ .-])\\d{3}[ .-]\\d{4}${END}`,
+    'g',
+  ),
+];
+
+const STREET_SUFFIX =
+  'Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Plaza|Plz|Square|Sq|Way|Place|Pl|Parkway|Pkwy|Highway|Hwy';
+
+const ADDRESS_PATTERNS = [
+  // A house number, one to four capitalized words, then a street suffix that
+  // is its own word, e.g. "123 Main St" or "42 North Oak Avenue".
+  new RegExp(
+    `${START}\\d{1,6}(?:\\s+[A-Z][A-Za-z'-]*){1,4}?\\s+(?:${STREET_SUFFIX})\\b\\.?`,
+    'g',
+  ),
+  /\bP\.?O\.?\s*Box\s+\d+\b/gi,
+  // UK postcode, e.g. SW1A 1AA.
+  /\b[A-Z]{1,2}\d[A-Z\d]? \d[A-Z]{2}\b/g,
+  // US ZIP+4 only. A bare 5 digit number is far more often a count or an id.
+  new RegExp(`${START}\\d{5}-\\d{4}${END}`, 'g'),
+];
+
+const digitsOf = (text: string) => text.replace(/\D/g, '');
+
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let n = Number(digits[i]);
+    if (double) {
+      n *= 2;
+      if (n > 9) n -= 9;
+    }
+    sum += n;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+// Visa, Mastercard, Amex, Discover, Diners, JCB.
+const CARD_PREFIX = /^(?:4|5[1-5]|2[2-7]|3[47]|3[068]|35|6(?:011|5|4[4-9]))/;
+
+function isLikelyCard(match: string): boolean {
+  const digits = digitsOf(match);
+  return (
+    digits.length >= 13 &&
+    digits.length <= 19 &&
+    CARD_PREFIX.test(digits) &&
+    passesLuhn(digits)
+  );
+}
+
 /**
  * Masks sensitive information in a string
  * @param text The text to mask sensitive information in
@@ -6,151 +108,32 @@
 export function maskSensitiveInfo(text: string): string {
   if (typeof text !== 'string') return text;
 
-  // Helper function to validate if a string is likely a phone number
-  const isLikelyPhoneNumber = (str: string): boolean => {
-    // Remove all non-digit characters
-    const digitsOnly = str.replace(/\D/g, '');
-    // Check if the resulting string has a reasonable number of digits for a phone number
-    return digitsOnly.length >= 7 && digitsOnly.length <= 15;
-  };
+  let masked = text
+    .replace(
+      SECRET_JSON,
+      (_m, open, _value, close) => `${open}[SECRET REDACTED]${close}`,
+    )
+    .replace(SECRET_PAIR, (_m, key) => `${key}[SECRET REDACTED]`)
+    .replace(
+      CLIENT_IP_JSON,
+      (_m, open, _value, close) => `${open}[IP REDACTED]${close}`,
+    )
+    .replace(CLIENT_IP_PAIR, (_m, key) => `${key}[IP REDACTED]`)
+    .replace(TWILIO_ACCOUNT_SID, '[TWILIO ACCOUNT SID REDACTED]')
+    .replace(EMAIL, '[EMAIL REDACTED]')
+    .replace(CARD, (m) => (isLikelyCard(m) ? '[CARD NUMBER REDACTED]' : m))
+    .replace(SSN, '[SSN REDACTED]');
 
-  // Function to check if a match is part of a URL
-  const isPartOfUrl = (match: string, fullText: string): boolean => {
-    // Find the position of the match in the full text
-    const matchIndex = fullText.indexOf(match);
-    if (matchIndex === -1) return false;
-
-    // Check if the match is part of a URL by looking for common URL patterns before it
-    const textBeforeMatch = fullText.substring(0, matchIndex);
-    const urlPrefixRegex = /https?:\/\/[^\s]*$/;
-    return urlPrefixRegex.test(textBeforeMatch);
-  };
-
-  // Email pattern
-  const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g;
-
-  // Credit card patterns (more specific to major card types)
-  // Visa: 13 or 16 digits, starts with 4
-  // Mastercard: 16 digits, starts with 51-55 or 2221-2720
-  // American Express: 15 digits, starts with 34 or 37
-  // Discover: 16 digits, starts with 6011, 622126-622925, 644-649, or 65
-  const creditCardPatterns = [
-    /\b4[0-9]{12}(?:[0-9]{3})?\b/g, // Visa
-    /\b(?:5[1-5][0-9]{2}|222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)[0-9]{12}\b/g, // Mastercard
-    /\b3[47][0-9]{13}\b/g, // American Express
-    /\b(?:6011|65[0-9]{2}|64[4-9][0-9]|6221[0-9]{2}|6222[0-9]{2}|6223[0-9]{2}|6224[0-9]{2}|6225[0-9]{2}|6226[0-9]{2}|6227[0-9]{2}|6228[0-9]{2}|6229[0-9]{2})[0-9]{10,12}\b/g, // Discover
-    // Generic pattern for other cards or when digits are separated
-    /\b(?:\d[ -]*?){13,16}\b/g,
-  ];
-
-  // Phone number patterns (various formats)
-  const phonePatterns = [
-    // International formats with + country code (covers +528008770427, +61468613312, etc.)
-    /\b\+\d{1,4}[ .-]?\d{1,14}(?:[ .-]?\d{1,14})*\b/g,
-
-    // International formats with + and parentheses (covers +44 (0) 7876163246)
-    /\b\+\d{1,4}[ .-]?\(\d{1,4}\)[ .-]?\d{1,14}(?:[ .-]?\d{1,14})*\b/g,
-
-    // Numbers with slashes (like +971 4 5096466/96/86)
-    /\b\+\d{1,4}[ .-]?\d{1,4}[ .-]?\d{1,14}(?:\/\d{1,4})+\b/g,
-
-    // US/Canada with country code 1 (without +)
-    /\b1[ .-]?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{4}\b/g,
-
-    // Common US formats (like 833-376-1995, 304-513-3153)
-    /\b\d{3}[.-]?\d{3}[.-]?\d{4}\b/g,
-
-    // Additional patterns to catch more formats:
-
-    // International numbers with spaces and no plus (like 44 20 3051 303)
-    /\b\d{1,4}[ ]\d{1,4}[ ]\d{1,4}[ ]\d{1,4}\b/g,
-
-    // Numbers with multiple slashes or extensions (like 5096466/96/86)
-    /\b\d{6,10}(?:\/\d{1,4}){1,5}\b/g,
-
-    // Numbers with parentheses and spaces (like (866) 687-3722)
-    /\b\(\d{3}\)[ .-]?\d{3}[ .-]?\d{4}\b/g,
-
-    // Numbers with plus and multiple groups (like +44 7867 254482)
-    /\b\+\d{1,4}[ ]\d{4}[ ]\d{6}\b/g,
-
-    // Numbers with country code and area code in parentheses (like +1(123)456-7890)
-    /\b\+\d{1,4}\(\d{3}\)\d{3}[-]?\d{4}\b/g,
-
-    // Numbers with multiple hyphens (like 123-456-7890)
-    /\b\d{3}[-]\d{3}[-]\d{4}\b/g,
-
-    // International numbers with specific formats seen in the data
-    /\b\+\d{1,4}[ ]?\d{1,4}[ ]?\d{4}[ ]?\d{4}\b/g,
-
-    // Specific formats from the JSON data
-    /\b\+[0-9]{10,15}\b/g, // Simple international numbers like +528008770427
-    /\b\+\d{1,4}[ ]?\d{1,4}[ ]?\d{1,4}[ ]?\d{1,4}\b/g, // Format like +971 4 5096466
-    /\b\d{1,4}[ -]?\d{1,4}[ -]?\d{1,4}[ -]?\d{1,4}\b/g, // Generic number pattern with spaces or hyphens
-  ];
-
-  // Address patterns
-  const addressPatterns = [
-    // US/Canada style addresses
-    /\b\d+\s+[A-Za-z0-9\s,.-]+(?:Avenue|Ave|Street|St|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Plaza|Plz|Square|Sq)\b/gi,
-    // PO Box
-    /\bP\.?O\.?\s*Box\s+\d+\b/gi,
-    // Postal/ZIP codes
-    /\b[A-Z]{1,2}\d[A-Z\d]? \d[A-Z]{2}\b/g, // UK Postal Code
-    /\b\d{5}(?:-\d{4})?\b/g, // US ZIP Code
-  ];
-
-  // Social Security Number (US)
-  const ssnPattern = /\b\d{3}[-]?\d{2}[-]?\d{4}\b/g;
-
-  // Replace each pattern with a masked version
-  let maskedText = text;
-
-  // Mask emails
-  const emailMatches = text.match(emailPattern) || [];
-  if (emailMatches.length > 0) {
-    maskedText = maskedText.replace(emailPattern, '[EMAIL REDACTED]');
-  }
-
-  // Mask credit cards
-  creditCardPatterns.forEach((pattern) => {
-    maskedText = maskedText.replace(pattern, '[CARD NUMBER REDACTED]');
-  });
-
-  // Mask phone numbers
-  phonePatterns.forEach((pattern) => {
-    maskedText = maskedText.replace(pattern, (match, offset, string) => {
-      // Skip masking if the match is part of a URL
-      if (isPartOfUrl(match, string)) {
-        return match;
-      }
-      return isLikelyPhoneNumber(match) ? '[PHONE REDACTED]' : match;
-    });
-  });
-
-  // Additional pass for phone numbers that might have been missed
-  // This helps catch any phone numbers that might have been missed due to overlapping patterns
-  let previousMaskedText = '';
-  while (previousMaskedText !== maskedText) {
-    previousMaskedText = maskedText;
-    phonePatterns.forEach((pattern) => {
-      maskedText = maskedText.replace(pattern, (match, offset, string) => {
-        // Skip masking if the match is part of a URL
-        if (isPartOfUrl(match, string)) {
-          return match;
-        }
-        return isLikelyPhoneNumber(match) ? '[PHONE REDACTED]' : match;
-      });
+  for (const pattern of PHONE_PATTERNS) {
+    masked = masked.replace(pattern, (m) => {
+      const digits = digitsOf(m).length;
+      return digits >= 8 && digits <= 15 ? '[PHONE REDACTED]' : m;
     });
   }
 
-  // Mask addresses
-  addressPatterns.forEach((pattern) => {
-    maskedText = maskedText.replace(pattern, '[ADDRESS REDACTED]');
-  });
+  for (const pattern of ADDRESS_PATTERNS) {
+    masked = masked.replace(pattern, '[ADDRESS REDACTED]');
+  }
 
-  // Mask SSNs
-  maskedText = maskedText.replace(ssnPattern, '[SSN REDACTED]');
-
-  return maskedText;
+  return masked;
 }

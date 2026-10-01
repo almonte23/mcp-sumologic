@@ -14,6 +14,19 @@ import {
 } from '@/domains/sumologic/errors.js';
 import { searchUiLink } from '@/domains/sumologic/links.js';
 
+// limit: the caller's limit returned fewer rows than matched.
+// rawMessageCap: this server's raw message cap (see allowLargeResult).
+// sumoCap: Sumo stopped gathering, so totals are a lower bound.
+// sumoWarning / sumoError: Sumo reported a warning or error for the job.
+// narrowedWindow: a capped `around` search was retried with a smaller window.
+export type PartialReason =
+  | 'narrowedWindow'
+  | 'limit'
+  | 'rawMessageCap'
+  | 'sumoCap'
+  | 'sumoWarning'
+  | 'sumoError';
+
 export interface SearchMeta {
   // Unique per search, so two results can never be confused for one another.
   jobId: string;
@@ -28,10 +41,17 @@ export interface SearchMeta {
   state: string;
   // What Sumo matched in total vs. what this response carries.
   totals: { messages: number; records: number };
+  // True when Sumo stopped counting at a cap, so the real totals are higher.
+  totalsAreLowerBound: boolean;
   returned: { messages: number; records: number };
+  // Message times of the newest and oldest raw message returned. Sumo returns
+  // the newest first, so a capped search can span far less than `window`.
+  returnedSpan?: { newest: string; oldest: string };
   truncated: boolean;
   // `complete` only when nothing was capped, paused, warned or errored.
   completeness: 'complete' | 'partial';
+  // Why the result is partial; empty when complete.
+  partialReasons: PartialReason[];
   warnings: string[];
   errors: string[];
   elapsedMs: number;
@@ -59,8 +79,9 @@ export interface SearchResult {
 
 // Sumo Logic caps a single results page at 10000 rows, so paginate above that.
 const MAX_ROWS_PER_PAGE = 10000;
-// Overall ceiling on rows a single search may return. Sumo limits a search to
-// 100K messages, so match that.
+// Overall ceiling on rows a single search may return (the tool's `limit`
+// maximum). Sumo itself stops gathering raw messages at its own cap; see
+// DEFAULT_MESSAGE_CAP.
 const MAX_TOTAL_ROWS = 100000;
 // Default number of rows to return when the caller doesn't specify a limit.
 const DEFAULT_LIMIT = 100;
@@ -78,6 +99,20 @@ const DEFAULT_MAX_POLL_MS = 5 * 60 * 1000;
 // briefly unavailable. Retry them with backoff rather than failing the search.
 const RETRYABLE_STATUS = [429, 502, 503, 504];
 const MAX_RETRIES = 4;
+// Sumo puts this text in every job status `warning`, even when the session
+// cookie is sent correctly, so it says nothing about this search.
+const COOKIE_NOTICE = /^You must enable cookies for subsequent requests/i;
+// Sumo stopped gathering at its result cap, so totals are a lower bound.
+const MAX_RESULTS_WARNING = /max(imum)? results reached/i;
+// Sumo stops gathering raw messages at this many, newest first, and does not
+// always say so. The API does not expose the number; SUMO_MESSAGE_CAP
+// overrides it if Sumo changes it.
+const DEFAULT_MESSAGE_CAP = 200000;
+
+function messageCap(): number {
+  const env = Number(process.env.SUMO_MESSAGE_CAP);
+  return Number.isFinite(env) && env > 0 ? env : DEFAULT_MESSAGE_CAP;
+}
 
 function maxPollMs(override?: number): number {
   if (override && override > 0) {
@@ -121,6 +156,9 @@ export interface SearchOptions {
   returnFields?: string[];
   // Override the poll timeout for this search.
   timeoutMs?: number;
+  // Internal: set on the one retry of a capped `around` search, holding the
+  // half width that was first asked for.
+  narrowedFromMs?: number;
 }
 
 // Aggregate operators produce grouped records instead of raw messages. A query
@@ -199,14 +237,17 @@ async function fetchAllRows(
     offset: number,
     pageLimit: number,
   ) => PromiseLike<{ fields: Sumo.IField[]; rows: any[] }>,
+  startOffset = 0,
 ): Promise<{ fields: Sumo.IField[]; rows: any[] }> {
-  const target = Math.min(total, wanted);
+  const target = Math.min(total - startOffset, wanted);
   let fields: Sumo.IField[] = [];
   const rows: any[] = [];
 
   while (rows.length < target) {
     const pageLimit = Math.min(MAX_ROWS_PER_PAGE, target - rows.length);
-    const page = await withRetry(() => fetchPage(rows.length, pageLimit));
+    const page = await withRetry(() =>
+      fetchPage(startOffset + rows.length, pageLimit),
+    );
     fields = page.fields;
     if (!page.rows.length) {
       break;
@@ -218,6 +259,115 @@ async function fetchAllRows(
   }
 
   return { fields, rows };
+}
+
+// Raw messages come back newest first, so an `around` search would otherwise
+// return the end of the window instead of the event. Sumo's histogram counts
+// how many messages are newer than the event; start half a page before that.
+// Half width (ms) for an around window expected to hold about 40% of the cap,
+// from the rate the capped search gathered: messageCount over the time between
+// the oldest non-empty histogram bucket and the window end.
+function narrowedHalfWidth(
+  buckets: any[],
+  toMs: number,
+  messageCount: number,
+): number | undefined {
+  const filled = buckets.filter((b) => Number(b?.count) > 0);
+  if (!filled.length || messageCount <= 0) {
+    return undefined;
+  }
+  const oldest = Math.min(...filled.map((b) => Number(b.startTimestamp)));
+  const perMs = messageCount / Math.max(toMs - oldest, 1);
+  return Math.max(5000, Math.floor((0.4 * messageCap()) / perMs));
+}
+
+// Each probe reads one message. Busy logs put ~1.5 messages in every ms, so
+// a few probes are not enough to land a 20 row page on the event.
+const MAX_AROUND_PROBES = 12;
+
+// Raw messages are sorted newest first, so the event's position can be found
+// by reading single messages: alternate interpolation (fast when the rate is
+// even) with halving (safe when it is not). Returns the offset to read from so
+// the event sits mid page.
+async function locateAround(
+  timeAt: (offset: number) => Promise<number | undefined>,
+  aroundMs: number,
+  total: number,
+  wanted: number,
+  page: { offset: number; count: number; newest: number; oldest: number },
+): Promise<number> {
+  const lastStart = Math.max(0, total - wanted);
+  // lo always holds a message newer than the event, hi one at or before it.
+  let lo: number;
+  let tLo: number;
+  let hi: number;
+  let tHi: number;
+  if (aroundMs > page.newest) {
+    hi = page.offset;
+    tHi = page.newest;
+    const first = await timeAt(0);
+    if (first === undefined || first <= aroundMs) {
+      return 0;
+    }
+    lo = 0;
+    tLo = first;
+  } else {
+    lo = page.offset + page.count - 1;
+    tLo = page.oldest;
+    hi = total - 1;
+    const last = await timeAt(hi);
+    if (last === undefined || last > aroundMs) {
+      return lastStart;
+    }
+    tHi = last;
+  }
+
+  // Stop once the gap fits in half a page: the page then holds the event.
+  const closeEnough = Math.max(1, Math.floor(wanted / 2));
+  for (let i = 0; i < MAX_AROUND_PROBES && hi - lo > closeEnough; i += 1) {
+    const share =
+      i % 2 === 0 && tLo > tHi ? (tLo - aroundMs) / (tLo - tHi) : 0.5;
+    const mid = Math.min(
+      hi - 1,
+      Math.max(lo + 1, lo + Math.round(share * (hi - lo))),
+    );
+    const time = await timeAt(mid);
+    if (time === undefined) {
+      break;
+    }
+    if (time > aroundMs) {
+      lo = mid;
+      tLo = time;
+    } else {
+      hi = mid;
+      tHi = time;
+    }
+  }
+  return Math.max(0, Math.min(hi - Math.floor(wanted / 2), lastStart));
+}
+
+const formatSpan = (ms: number) =>
+  ms >= 60000 ? `${+(ms / 60000).toFixed(1)}m` : `${Math.round(ms / 1000)}s`;
+
+function aroundOffset(
+  buckets: any[],
+  aroundMs: number,
+  total: number,
+  wanted: number,
+): number {
+  let newer = 0;
+  for (const b of buckets) {
+    const start = Number(b?.startTimestamp);
+    const length = Number(b?.length);
+    const count = Number(b?.count) || 0;
+    if (start >= aroundMs) {
+      newer += count;
+    } else if (length > 0 && start + length > aroundMs) {
+      newer += (count * (start + length - aroundMs)) / length;
+    }
+  }
+  const offset = Math.round(newer - wanted / 2);
+  return Math.max(0, Math.min(offset, total - wanted));
 }
 
 // Only these fields can contain PII worth masking.
@@ -264,6 +414,34 @@ function sanitizeRow(row: any): any {
   }
 
   return row;
+}
+
+// On a capped search Sumo gathers the newest messages only, so every empty
+// bucket older than the oldest non-empty one was never searched.
+function trimUnsearchedBuckets(buckets: any[]): any[] {
+  const filled = buckets.filter((b) => Number(b?.count) > 0);
+  if (!filled.length) {
+    return buckets;
+  }
+  const oldest = Math.min(...filled.map((b) => Number(b.startTimestamp)));
+  return buckets.filter(
+    (b) => Number(b?.count) > 0 || Number(b?.startTimestamp) >= oldest,
+  );
+}
+
+function returnedSpan(
+  rows: any[] = [],
+): { newest: string; oldest: string } | undefined {
+  const times = rows
+    .map((row) => Number(row?.map?._messagetime))
+    .filter(Number.isFinite);
+  if (!times.length) {
+    return undefined;
+  }
+  return {
+    newest: toIso(Math.max(...times)),
+    oldest: toIso(Math.min(...times)),
+  };
 }
 
 // Keep only the requested keys of a row's map (case-insensitive).
@@ -360,6 +538,8 @@ export async function search(
     ? new Set(options.returnFields.map((f) => f.toLowerCase()))
     : undefined;
   const shape = (row: any) => projectRow(sanitizeRow(row), keep);
+  const shapeFields = (fields: Sumo.IField[]) =>
+    keep ? fields.filter((f) => keep.has(f.name?.toLowerCase())) : fields;
 
   // Create search job
   const jobParams: Sumo.IJobOptions = {
@@ -405,7 +585,7 @@ export async function search(
 
     // Wait for the job to reach a terminal state. A job may also end in
     // CANCELLED, and 'FORCE PAUSED' means results are ready (a non-aggregate
-    // query hit its 100K cap) — so treat both done states as complete. Guard
+    // query hit its message cap) — so treat both done states as complete. Guard
     // with a timeout so a stuck job can't spin this loop forever.
     const doneStates = ['DONE GATHERING RESULTS', 'FORCE PAUSED'];
     const timeoutMs = maxPollMs(options.timeoutMs);
@@ -414,7 +594,7 @@ export async function search(
       status = await withRetry(() => session.status(id));
       warnings.push(...toStrings(status.pendingWarnings));
       errors.push(...toStrings(status.pendingErrors));
-      if (status.warning) {
+      if (status.warning && !COOKIE_NOTICE.test(status.warning)) {
         warnings.push(status.warning);
       }
 
@@ -454,22 +634,77 @@ export async function search(
     const messageCount = status.messageCount ?? 0;
     const isAggregate = recordCount > 0 || looksLikeAggregateQuery(query);
 
+    // Only warnings Sumo sent, before this server adds its own below. The
+    // "max results" warning is reported as sumoCap instead.
+    const hasSumoWarning = warnings.some((w) => !MAX_RESULTS_WARNING.test(w));
+    const forcePaused = status.state === 'FORCE PAUSED';
+    if (forcePaused) {
+      warnings.push(
+        'Job FORCE PAUSED: Sumo stopped gathering at its message cap, so totals are a lower bound. Narrow the query or use an aggregate.',
+      );
+    }
+    // A plain aggregate keeps no raw messages, so its messageCount is the
+    // real total and is never capped.
+    const gathersRawMessages = !isAggregate || !!options.requiresRawMessages;
+    const totalsAreLowerBound =
+      forcePaused ||
+      warnings.some((w) => MAX_RESULTS_WARNING.test(w)) ||
+      (gathersRawMessages && messageCount >= messageCap());
+    // With requiresRawMessages Sumo still aggregates the whole window; only
+    // the raw messages it keeps stop at the cap.
+    if (totalsAreLowerBound && isAggregate && options.requiresRawMessages) {
+      warnings.push(
+        'The aggregate records cover the whole window. Only the raw messages stop at the cap (newest first), so totals.messages is a lower bound.',
+      );
+    } else if (totalsAreLowerBound && !forcePaused) {
+      warnings.push(
+        'Sumo stopped gathering at its result cap, so totals are a lower bound. Use an aggregate (e.g. | count) for the real total.',
+      );
+    }
+
+    if (options.narrowedFromMs) {
+      warnings.push(
+        `Narrowed the around window from ±${formatSpan(options.narrowedFromMs)} to ±${formatSpan((toMs - fromMs) / 2)}: the wider window hit Sumo's cap before it reached the event.`,
+      );
+    }
+
     // Best-effort volume-over-time buckets from the final status.
-    const histogram = options.includeHistogram
+    let histogram = options.includeHistogram
       ? (status.histogramBuckets ?? [])
       : undefined;
+    if (totalsAreLowerBound && histogram) {
+      const trimmed = trimUnsearchedBuckets(histogram);
+      const dropped = histogram.length - trimmed.length;
+      histogram = trimmed;
+      warnings.push(
+        'The histogram only covers the newest gathered messages, so empty buckets were not searched' +
+          (dropped ? `; ${dropped} empty older buckets were dropped` : '') +
+          '. Use sumologic_timeline for real volume.',
+      );
+    }
 
-    const buildMeta = (returned: { messages: number; records: number }) => {
-      const truncated = isAggregate
-        ? returned.records < recordCount ||
-          (!!options.requiresRawMessages && returned.messages < messageCount)
-        : returned.messages < messageCount;
-      const forcePaused = status.state === 'FORCE PAUSED';
-      if (forcePaused) {
-        warnings.push(
-          'Job FORCE PAUSED: Sumo stopped gathering at its 100K message cap, so totals are a lower bound. Narrow the query or use an aggregate.',
-        );
+    const buildMeta = (
+      returned: { messages: number; records: number },
+      rawRows: any[] = [],
+    ) => {
+      const recordsShort = isAggregate && returned.records < recordCount;
+      const messagesShort =
+        gathersRawMessages && returned.messages < messageCount;
+      const truncated = recordsShort || messagesShort;
+      const rawCapHit =
+        messagesShort && rawLimit < limit && returned.messages >= rawLimit;
+
+      const partialReasons: PartialReason[] = [];
+      if (recordsShort || (messagesShort && !rawCapHit)) {
+        partialReasons.push('limit');
       }
+      if (rawCapHit) partialReasons.push('rawMessageCap');
+      if (totalsAreLowerBound) partialReasons.push('sumoCap');
+      if (hasSumoWarning) partialReasons.push('sumoWarning');
+      if (errors.length) partialReasons.push('sumoError');
+      if (options.narrowedFromMs) partialReasons.push('narrowedWindow');
+
+      const span = returnedSpan(rawRows);
       const meta: SearchMeta = {
         jobId: id,
         query,
@@ -485,12 +720,12 @@ export async function search(
         },
         state: status.state,
         totals: { messages: messageCount, records: recordCount },
+        totalsAreLowerBound,
         returned,
+        ...(span && { returnedSpan: span }),
         truncated,
-        completeness:
-          truncated || forcePaused || warnings.length || errors.length
-            ? 'partial'
-            : 'complete',
+        completeness: partialReasons.length ? 'partial' : 'complete',
+        partialReasons,
         warnings: [...new Set(warnings)],
         errors: [...new Set(errors)],
         elapsedMs: Date.now() - startedAt,
@@ -533,37 +768,129 @@ export async function search(
 
       return {
         type: 'records',
-        fields: records.fields,
+        fields: shapeFields(records.fields),
         records: records.rows.map(shape),
         ...(rawMessages && { messages: rawMessages.rows.map(shape) }),
         ...(histogram && { histogram }),
         ...(rawMessages && capNote && { note: capNote }),
-        meta: buildMeta({
-          messages: rawMessages?.rows.length ?? 0,
-          records: records.rows.length,
-        }),
+        meta: buildMeta(
+          {
+            messages: rawMessages?.rows.length ?? 0,
+            records: records.rows.length,
+          },
+          rawMessages?.rows,
+        ),
       };
     }
 
     // Non-aggregate search: return the raw log messages.
-    const messages = await fetchAllRows(
-      messageCount || rawLimit,
-      rawLimit,
-      async (offset, pageLimit) => {
-        const page = await session.messages(id, { offset, limit: pageLimit });
-        return { fields: page.fields, rows: page.messages };
-      },
-    );
+    const aroundMs = options.around ? (fromMs + toMs) / 2 : undefined;
+    const fetchFrom = (offset: number) =>
+      fetchAllRows(
+        messageCount || rawLimit,
+        rawLimit,
+        async (from, pageLimit) => {
+          const page = await session.messages(id, {
+            offset: from,
+            limit: pageLimit,
+          });
+          return { fields: page.fields, rows: page.messages };
+        },
+        offset,
+      );
+    let startOffset =
+      aroundMs !== undefined
+        ? aroundOffset(
+            status.histogramBuckets ?? [],
+            aroundMs,
+            messageCount,
+            rawLimit,
+          )
+        : 0;
+    let messages = await fetchFrom(startOffset);
+
+    // The histogram only places the event to within a bucket. When the page
+    // misses it, close in on the event's position before giving up.
+    const firstSpan = returnedSpan(messages.rows);
+    if (
+      aroundMs !== undefined &&
+      firstSpan &&
+      (aroundMs < Date.parse(firstSpan.oldest) ||
+        aroundMs > Date.parse(firstSpan.newest))
+    ) {
+      const refined = await locateAround(
+        async (offset) => {
+          const page = await withRetry(() =>
+            session.messages(id, { offset, limit: 1 }),
+          );
+          const time = Number(page.messages?.[0]?.map?._messagetime);
+          return Number.isFinite(time) ? time : undefined;
+        },
+        aroundMs,
+        messageCount,
+        rawLimit,
+        {
+          offset: startOffset,
+          count: messages.rows.length,
+          newest: Date.parse(firstSpan.newest),
+          oldest: Date.parse(firstSpan.oldest),
+        },
+      );
+      if (refined !== startOffset) {
+        startOffset = refined;
+        messages = await fetchFrom(startOffset);
+      }
+    }
+
+    // A miss only when a capped search read up to the edge of what Sumo
+    // gathered and the event lies beyond it.
+    const span = returnedSpan(messages.rows);
+    const atOldestEdge = startOffset >= Math.max(0, messageCount - rawLimit);
+    const missedAround =
+      aroundMs !== undefined &&
+      totalsAreLowerBound &&
+      (span
+        ? (aroundMs < Date.parse(span.oldest) && atOldestEdge) ||
+          (aroundMs > Date.parse(span.newest) && startOffset === 0)
+        : messageCount > 0);
 
     await cleanup();
 
+    // Sumo gathers the newest messages first, so a capped window can stop
+    // before it reaches the event. Retry once with a window small enough to
+    // stay under the cap at the rate this search just saw.
+    if (missedAround && totalsAreLowerBound && !options.narrowedFromMs) {
+      const half = (toMs - fromMs) / 2;
+      const narrowHalf = narrowedHalfWidth(
+        status.histogramBuckets ?? [],
+        toMs,
+        messageCount,
+      );
+      if (narrowHalf !== undefined && narrowHalf < half) {
+        return search(client, query, {
+          ...options,
+          aroundMinutes: narrowHalf / 60000,
+          narrowedFromMs: half,
+        });
+      }
+    }
+
+    if (missedAround) {
+      warnings.push(
+        `The returned messages do not reach the around time (${toIso(aroundMs!)}); Sumo only gathered part of the window. Scope the query with _sourceCategory or lower aroundMinutes.`,
+      );
+    }
+
     return {
       type: 'messages',
-      fields: messages.fields,
+      fields: shapeFields(messages.fields),
       messages: messages.rows.map(shape),
       ...(histogram && { histogram }),
       ...(capNote && messageCount > rawLimit && { note: capNote }),
-      meta: buildMeta({ messages: messages.rows.length, records: 0 }),
+      meta: buildMeta(
+        { messages: messages.rows.length, records: 0 },
+        messages.rows,
+      ),
     };
   } catch (error) {
     await cleanup();

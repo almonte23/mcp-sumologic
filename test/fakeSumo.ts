@@ -61,9 +61,10 @@ export const httpError = (statusCode: number, body: any = {}) =>
 
 // Standard job lifecycle: POST job -> GET status -> GET messages/records -> DELETE.
 export function jobRoutes(opts: {
-  status: any | (() => any);
-  messages?: any[];
+  status: any | ((jobBody: any) => any);
+  messages?: any[] | ((jobBody: any) => any[]);
   records?: any[] | ((jobBody: any) => any[]);
+  fields?: Array<{ name: string }>;
   onJob?: (body: any) => void;
 }): Array<[RegExp, 'get' | 'post' | 'delete', Route]> {
   const jobs = new Map<string, any>();
@@ -86,8 +87,11 @@ export function jobRoutes(opts: {
         const offset = Number(/offset=(\d+)/.exec(url)?.[1] ?? 0);
         const limit = Number(/limit=(\d+)/.exec(url)?.[1] ?? 0);
         return {
-          fields: [],
-          messages: (opts.messages ?? []).slice(offset, offset + limit),
+          fields: opts.fields ?? [],
+          messages: (typeof opts.messages === 'function'
+            ? opts.messages(jobOf(url))
+            : (opts.messages ?? [])
+          ).slice(offset, offset + limit),
         };
       },
     ],
@@ -105,7 +109,10 @@ export function jobRoutes(opts: {
     [
       /^\/search\/jobs\/JOB\d+$/,
       'get',
-      () => (typeof opts.status === 'function' ? opts.status() : opts.status),
+      ({ url }) =>
+        typeof opts.status === 'function'
+          ? opts.status(jobOf(url))
+          : opts.status,
     ],
     [/^\/search\/jobs\/JOB\d+$/, 'delete', () => undefined],
   ];
