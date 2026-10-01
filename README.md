@@ -124,6 +124,7 @@ Every `search_sumologic` response includes a `meta` object alongside the existin
   "state": "DONE GATHERING RESULTS",
   "totals":   { "messages": 5432, "records": 0 },   // what Sumo matched
   "totalsAreLowerBound": false,           // true when Sumo stopped counting at its cap
+  "hint": "...",                          // only when a _sourceCategory scoped search matched nothing
   "returned": { "messages": 100,  "records": 0 },   // what this response carries
   "returnedSpan": { "newest": "2026-09-29T21:59:58.120Z", "oldest": "2026-09-29T21:59:41.003Z" }, // raw messages only
   "truncated": true,
@@ -144,7 +145,7 @@ All read-only.
 | Tool | What it answers |
 |---|---|
 | `sumologic_timeline` | When did it start, how often, when did it peak? Zero-filled `timeslice` counts computed Sumo-side, with `firstSeen`/`lastSeen`/`peak`; optional `groupBy`. |
-| `sumologic_compare_windows` | Is this window worse than usual? Same query over the window and baseline windows shifted by `baselineOffsets` (default `24h`), with a `spike`/`drop`/`normal` verdict. |
+| `sumologic_compare_windows` | Is this window worse than usual? Same query over the window and baseline windows shifted by `baselineOffsets` (default `24h`), with a `spike`/`drop`/`normal` verdict on totals, plus `burst` when the busiest bucket is `spikeRatio`× every baseline's busiest bucket (a short storm inside a normal total). |
 | `sumologic_discover_sources` | Which `_sourceCategory` (or host, collector, any field) values exist under a scope, with counts. |
 | `sumologic_list_indexes` | Partitions searchable with `_index=`, with routing, tier and retention. |
 | `sumologic_list_fields` | Built-in and custom (indexed) field names. |

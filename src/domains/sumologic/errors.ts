@@ -116,7 +116,10 @@ export function classifyError(err: unknown): SumoSearchError {
 // Text returned to the MCP client for a failed tool call. The explicit
 // "not an empty result" line exists because skills have mistaken silent
 // failures for quiet windows.
-export function formatToolError(err: unknown): string {
+export function formatToolError(
+  err: unknown,
+  what: 'search' | 'call' = 'search',
+): string {
   const e = err instanceof SumoSearchError ? err : classifyError(err);
   return (
     `Error: ${e.message}\n` +
@@ -128,7 +131,10 @@ export function formatToolError(err: unknown): string {
           statusCode: e.statusCode,
           sumoCode: e.sumoCode,
           hint: e.hint,
-          note: 'This search FAILED. It is not an empty result; do not treat the window as clean.',
+          note:
+            what === 'search'
+              ? 'This search FAILED. It is not an empty result; do not treat the window as clean.'
+              : 'This call FAILED. It is not an empty result; do not read it as nothing found.',
         },
       },
       null,

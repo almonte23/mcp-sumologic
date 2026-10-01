@@ -52,6 +52,9 @@ export interface SearchMeta {
   completeness: 'complete' | 'partial';
   // Why the result is partial; empty when complete.
   partialReasons: PartialReason[];
+  // Set when a search scoped by _sourceCategory matched nothing: a wrong
+  // category name returns a complete, empty result too.
+  hint?: string;
   warnings: string[];
   errors: string[];
   elapsedMs: number;
@@ -730,6 +733,12 @@ export async function search(
         errors: [...new Set(errors)],
         elapsedMs: Date.now() - startedAt,
       };
+      const category = /_sourceCategory\s*=\s*("[^"]*"|[^\s|)]+)/i.exec(
+        query,
+      )?.[1];
+      if (messageCount === 0 && category) {
+        meta.hint = `Nothing matched _sourceCategory=${category}. If you expected data, check the name with sumologic_discover_sources; a wrong category also returns 0.`;
+      }
       const ui = searchUiLink(client.endpoint, query, fromMs, toMs);
       if (ui) {
         meta.links = { ui };

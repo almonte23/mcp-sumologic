@@ -84,8 +84,10 @@ const READ_ONLY = { readOnlyHint: true, openWorldHint: true } as const;
 
 type Handler<A> = (args: A) => Promise<unknown>;
 
+// `what` sets the failure wording: the timeline, compare and discover tools
+// run searches; the catalog, scan and metrics tools are plain API calls.
 const respond =
-  <A>(fn: Handler<A>) =>
+  <A>(fn: Handler<A>, what: 'search' | 'call' = 'search') =>
   async (args: A) => {
     try {
       const result = await fn(args);
@@ -95,7 +97,7 @@ const respond =
     } catch (err) {
       return {
         isError: true,
-        content: [{ type: 'text' as const, text: formatToolError(err) }],
+        content: [{ type: 'text' as const, text: formatToolError(err, what) }],
       };
     }
   };
@@ -266,7 +268,7 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond(({ includeAudit }) => listIndexes(client, includeAudit)),
+    respond(({ includeAudit }) => listIndexes(client, includeAudit), 'call'),
   );
 
   server.registerTool(
@@ -279,7 +281,7 @@ export function registerExtraTools(
       inputSchema: {},
       annotations: READ_ONLY,
     },
-    respond(() => listFields(client)),
+    respond(() => listFields(client), 'call'),
   );
 
   server.registerTool(
@@ -300,7 +302,7 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond(({ limit }) => listHealthEvents(client, limit)),
+    respond(({ limit }) => listHealthEvents(client, limit), 'call'),
   );
 
   server.registerTool(
@@ -328,7 +330,7 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond(({ query, limit }) => searchMonitors(client, query, limit)),
+    respond(({ query, limit }) => searchMonitors(client, query, limit), 'call'),
   );
 
   server.registerTool(
@@ -353,7 +355,10 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond(({ filter, limit }) => listSavedSearches(client, filter, limit)),
+    respond(
+      ({ filter, limit }) => listSavedSearches(client, filter, limit),
+      'call',
+    ),
   );
 
   server.registerTool(
@@ -374,7 +379,7 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond(({ limit }) => listScheduledViews(client, limit)),
+    respond(({ limit }) => listScheduledViews(client, limit), 'call'),
   );
 
   server.registerTool(
@@ -391,7 +396,7 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond((args) => estimateScan(client, args)),
+    respond((args) => estimateScan(client, args), 'call'),
   );
 
   server.registerTool(
@@ -427,6 +432,6 @@ export function registerExtraTools(
       },
       annotations: READ_ONLY,
     },
-    respond((args) => queryMetrics(client, args)),
+    respond((args) => queryMetrics(client, args), 'call'),
   );
 }

@@ -587,3 +587,41 @@ test('around lands on the event in a large window with uneven traffic', async ()
   const reads = calls.filter((c) => /\/messages/.test(c.url)).length;
   assert.ok(reads <= 16, `bounded extra requests (${reads})`);
 });
+
+test('hints at the source category when a scoped search finds nothing', async () => {
+  const run = (query: string, messageCount = 0) =>
+    search(
+      fakeClient(
+        jobRoutes({
+          status: done({ messageCount, recordCount: messageCount ? 1 : 0 }),
+          records: messageCount ? [{ map: { _count: '5' } }] : [],
+        }),
+      ).client,
+      query,
+    );
+
+  const empty = await run(
+    '_index=Production _sourceCategory=prod/portal/* error | count',
+  );
+  assert.match(empty.meta.hint!, /sumologic_discover_sources/);
+  assert.match(empty.meta.hint!, /prod\/portal\/\*/);
+  assert.equal(empty.meta.completeness, 'complete', 'a hint is not a warning');
+
+  assert.equal(
+    (await run('_index=Production error | count')).meta.hint,
+    undefined,
+  );
+  assert.equal(
+    (await run('_index=Production _sourceCategory=x | count', 5)).meta.hint,
+    undefined,
+  );
+});
+
+test('failed non-search calls say the call failed, not a search', () => {
+  const err = new SumoSearchError('Permission denied.', 'forbidden');
+  assert.match(formatToolError(err), /This search FAILED/);
+  const call = formatToolError(err, 'call');
+  assert.match(call, /This call FAILED/);
+  assert.doesNotMatch(call, /search|window/i);
+  assert.match(call, /not an empty result/);
+});

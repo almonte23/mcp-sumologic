@@ -211,3 +211,52 @@ test('rate limiter spaces calls and caps concurrency', async () => {
   // 6 calls at 20/s need at least ~250ms between first and last start.
   assert.ok(starts[5] >= 240, `last start at ${starts[5]}ms`);
 });
+
+test('compare_windows flags a one-bucket burst inside a normal total', async () => {
+  const M = 60e3;
+  const { client } = fakeClient(
+    jobRoutes({
+      status: done({ recordCount: 10 }),
+      // Current: 10 quiet minutes plus one minute of 200. Baseline: 20 a minute.
+      records: (job) =>
+        job.from >= T0
+          ? [
+              ...Array.from({ length: 10 }, (_, i) => slice(T0 + i * M, 10)),
+              slice(T0 + 37 * M, 200),
+            ]
+          : Array.from({ length: 10 }, (_, i) => slice(job.from + i * M, 20)),
+    }),
+  );
+  const res: any = await compareWindows(client, {
+    query: 'x',
+    from: String(T0),
+    to: String(T0 + H),
+    baselineOffsets: ['24h', '7d'],
+  });
+
+  assert.equal(res.verdict, 'normal', 'totals rule is unchanged');
+  for (const c of res.comparisons) {
+    assert.equal(c.verdict, 'normal');
+    assert.equal(c.peakRatio, 10);
+    assert.equal(c.burst, true);
+  }
+  assert.equal(res.burst.at, new Date(T0 + 37 * M).toISOString());
+  assert.equal(res.burst.count, 200);
+  assert.match(res.burst.reason, /10\.0x/);
+});
+
+test('compare_windows reports no burst when the peaks are similar', async () => {
+  const { client } = fakeClient(
+    jobRoutes({
+      status: done({ recordCount: 1 }),
+      records: (job) => [slice(job.from, job.from >= T0 ? 12 : 10)],
+    }),
+  );
+  const res: any = await compareWindows(client, {
+    query: 'x',
+    from: String(T0),
+    to: String(T0 + H),
+  });
+  assert.equal(res.burst, null);
+  assert.equal(res.comparisons[0].burst, false);
+});

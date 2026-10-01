@@ -346,8 +346,29 @@ export async function compareWindows(
     completeness: meta.completeness,
     warnings: meta.warnings,
     errors: meta.errors,
+    ...(meta.hint && { hint: meta.hint }),
     uiLink: meta.links?.ui,
   });
+
+  // Totals can look normal while one bucket explodes (a one minute error
+  // storm inside a quiet hour), so compare the busiest buckets as well.
+  const judgePeak = (base: TimelineResult) => {
+    const now = current.peak?.count ?? 0;
+    const then = base.peak?.count ?? 0;
+    if (then === 0) {
+      return {
+        peakRatio: null,
+        burst: now > minNoBaseline,
+        burstReason: `busiest ${bucket}: ${now} vs 0`,
+      };
+    }
+    const ratio = now / then;
+    return {
+      peakRatio: Number(ratio.toFixed(3)),
+      burst: ratio >= spikeRatio,
+      burstReason: `busiest ${bucket}: ${now} vs ${then} (${ratio.toFixed(1)}x)`,
+    };
+  };
 
   const comparisons = baselines.map((b, i) => {
     const { verdict, reason } = judge(
@@ -363,9 +384,24 @@ export async function compareWindows(
       delta: current.total - b.total,
       verdict,
       reason,
+      ...judgePeak(b),
       baseline: strip(b),
     };
   });
+
+  const peakRatios = comparisons.map((c) => c.peakRatio ?? Infinity);
+  const burst =
+    comparisons.length && comparisons.every((c) => c.burst) && current.peak
+      ? {
+          at: current.peak.at,
+          count: current.peak.count,
+          reason: `busiest ${bucket} at ${current.peak.at} had ${current.peak.count}, ${
+            Number.isFinite(Math.min(...peakRatios))
+              ? `${Math.min(...peakRatios).toFixed(1)}x`
+              : 'far above'
+          } every baseline's busiest ${bucket}`,
+        }
+      : null;
 
   const verdicts = comparisons.map((c) => c.verdict);
   const overall: Verdict = verdicts.every((v) => v === 'spike')
@@ -384,8 +420,10 @@ export async function compareWindows(
       spikeRatio,
       minCountWhenNoBaseline: minNoBaseline,
       overall: 'spike/drop only when every baseline agrees',
+      burst: `busiest bucket >= spikeRatio x every baseline's busiest bucket`,
     },
     verdict: overall,
+    burst,
     ...(partial && {
       caution:
         'At least one window returned partial results (see warnings/errors); treat the verdict as provisional.',

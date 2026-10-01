@@ -19,7 +19,7 @@ Trusting results:
 Choosing a tool:
 - Raw lines or a custom aggregate: search_sumologic. Aggregates (count, sum, avg, pct, by, timeslice) run Sumo-side and return compact "records"; prefer them to counting raw messages.
 - When did it start / is it growing: sumologic_timeline.
-- Worse than usual: sumologic_compare_windows (vs 24h/7d earlier).
+- Worse than usual: sumologic_compare_windows (vs 24h/7d earlier); check burst, not just verdict.
 - Context around one event: search_sumologic with around=<timestamp>, aroundMinutes.
 - Unknown index or source category: sumologic_list_indexes, then sumologic_discover_sources. Don't guess.
 - Long (weeks+) or broad searches: sumologic_estimate_scan first; check sumologic_list_scheduled_views.
