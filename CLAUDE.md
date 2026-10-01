@@ -6,6 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCP server for Sumo Logic log searches. Exposes `search_sumologic` plus read-only analysis and discovery tools (`sumologic_*`, registered in `src/tools.ts`) via the Model Context Protocol over Streamable HTTP transport (Express server on port 3006). Primary consumers are AI skills (debug-with-telemetry, optimize-with-telemetry, picasso), so results must make failure, truncation and partial data explicit.
 
+## Releasing a version
+
+Live tests cannot run from this repo: they need a Claude Code session with this server connected, which is globo-portal. After a version bump (`package.json` `version` and `VERSION` in `src/index.ts`) and a rebuild, run the `sumo-mcp-check` skill from globo-portal. It reads `src/docs/live-test-plan.md`, runs only the cases that cover the files changed since the commit in `src/docs/live-test-results.md`, and rewrites that results file. Commit the results file with the version.
+
+When you add a source file or a case, update the file to case map in `globo-portal/.claude/skills/sumo-mcp-check/SKILL.md`.
+
+Test data must never contain real IDs copied from logs (Twilio SIDs, account IDs, task IDs, client IPs). GitHub push protection rejects them; build fake ones at runtime.
+
 ## Commands
 
 ```bash
@@ -46,7 +54,9 @@ src/
 │   ├── json.ts                   # Compact JSON for tool output (handles circular refs)
 │   ├── pii.ts                    # PII masking (email, phone, CC, SSN, address, secrets)
 │   └── time.ts                   # Time parsing: ISO/offset/epoch/relative, zones, windows
-└── docs/sumologic-api-1.0.0.yaml # Sumo Logic OpenAPI spec (reference for new endpoints)
+├── docs/sumologic-api-1.0.0.yaml # Sumo Logic OpenAPI spec (reference for new endpoints)
+├── docs/live-test-plan.md        # Live test cases (run from globo-portal: sumo-mcp-check)
+└── docs/live-test-results.md     # Last live run: version, commit, pass or fail per case
 ```
 
 ### Request Flow
