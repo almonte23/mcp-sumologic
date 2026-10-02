@@ -679,6 +679,27 @@ test('probes a known good category only once per process', async () => {
   );
 });
 
+test('probes inside the same _index or _view as the search', async () => {
+  const { routes, jobs } = probeRoutes(true);
+  const { client } = fakeClient(routes);
+  await search(
+    client,
+    '_index=PreProduction _sourceCategory=staging/portal/web "nothing"',
+  );
+  await search(client, '_view=my_view _sourceCategory=view/cat "nothing"');
+  await search(client, '_sourceCategory=staging/portal/web "nothing"');
+
+  assert.deepEqual(
+    jobs.filter((q) => q.endsWith('| limit 1')),
+    [
+      '_index=PreProduction _sourceCategory=staging/portal/web | limit 1',
+      '_view=my_view _sourceCategory=view/cat | limit 1',
+      '_sourceCategory=staging/portal/web | limit 1',
+    ],
+    'a partition outside the default scope is only searched when named, and a known category is cached per scope',
+  );
+});
+
 test('keeps the hint when the probe fails', async () => {
   const { routes } = probeRoutes('error');
   const res = await search(

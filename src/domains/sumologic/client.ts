@@ -513,36 +513,47 @@ function sourceCategoryOf(query: string): string | undefined {
   return /_sourceCategory\s*=\s*("[^"]*"|[^\s|)]+)/i.exec(query)?.[1];
 }
 
+// Partitions outside the default search scope (e.g. PreProduction) are only
+// searched when the query names them, so the probe must keep the same scope.
+function partitionScopeOf(query: string): string {
+  const scope = query.split('|')[0];
+  return [
+    ...scope.matchAll(/(?:^|\s)(_(?:index|view)\s*=\s*(?:"[^"]*"|[^\s)]+))/gi),
+  ]
+    .map((m) => m[1].replace(/\s*=\s*/, '='))
+    .join(' ');
+}
+
 // A zero result scoped by _sourceCategory is ambiguous: the category name may
 // be wrong, or only the search terms matched nothing. Probe the category alone
-// over the same window so the hint fires only for the first case. A category
-// that once returned data stays known for a while, so baselines and repeated
-// searches don't probe again.
+// (inside the same partition scope) over the same window so the hint fires only
+// for the first case. A category that once returned data stays known for a
+// while, so baselines and repeated searches don't probe again.
 async function categoryHasData(
   client: Sumo.Client,
   category: string,
+  partitionScope: string,
   options: SearchOptions,
 ): Promise<boolean> {
-  const knownAt = knownCategories.get(category);
+  const probeScope = [partitionScope, `_sourceCategory=${category}`]
+    .filter(Boolean)
+    .join(' ');
+  const knownAt = knownCategories.get(probeScope);
   if (knownAt && Date.now() - knownAt < KNOWN_CATEGORY_TTL_MS) return true;
 
-  const probe = await runSearch(
-    client,
-    `_sourceCategory=${category} | limit 1`,
-    {
-      from: options.from,
-      to: options.to,
-      around: options.around,
-      aroundMinutes: options.aroundMinutes,
-      timeZone: options.timeZone,
-      byReceiptTime: options.byReceiptTime,
-      bySearchableTime: options.bySearchableTime,
-      limit: 1,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    },
-  );
+  const probe = await runSearch(client, `${probeScope} | limit 1`, {
+    from: options.from,
+    to: options.to,
+    around: options.around,
+    aroundMinutes: options.aroundMinutes,
+    timeZone: options.timeZone,
+    byReceiptTime: options.byReceiptTime,
+    bySearchableTime: options.bySearchableTime,
+    limit: 1,
+    timeoutMs: PROBE_TIMEOUT_MS,
+  });
   const found = probe.meta.totals.messages > 0;
-  if (found) knownCategories.set(category, Date.now());
+  if (found) knownCategories.set(probeScope, Date.now());
   return found;
 }
 
@@ -555,9 +566,12 @@ export async function search(
   const category = sourceCategoryOf(query);
   if (result.meta.totals.messages > 0 || !category) return result;
 
-  const hasData = await categoryHasData(client, category, options).catch(
-    () => false,
-  );
+  const hasData = await categoryHasData(
+    client,
+    category,
+    partitionScopeOf(query),
+    options,
+  ).catch(() => false);
   if (!hasData) {
     result.meta.hint = `Nothing matched _sourceCategory=${category}. If you expected data, check the name with sumologic_discover_sources; a wrong category also returns 0.`;
   }
