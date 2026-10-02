@@ -52,8 +52,9 @@ export interface SearchMeta {
   completeness: 'complete' | 'partial';
   // Why the result is partial; empty when complete.
   partialReasons: PartialReason[];
-  // Set when a search scoped by _sourceCategory matched nothing: a wrong
-  // category name returns a complete, empty result too.
+  // Set when a search scoped by _sourceCategory matched nothing and the
+  // category alone also matched nothing in the window (or the check failed):
+  // a wrong category name returns a complete, empty result too.
   hint?: string;
   warnings: string[];
   errors: string[];
@@ -504,7 +505,66 @@ function resolveJobWindow(
   };
 }
 
+const PROBE_TIMEOUT_MS = 30_000;
+const KNOWN_CATEGORY_TTL_MS = 15 * 60_000;
+const knownCategories = new Map<string, number>();
+
+function sourceCategoryOf(query: string): string | undefined {
+  return /_sourceCategory\s*=\s*("[^"]*"|[^\s|)]+)/i.exec(query)?.[1];
+}
+
+// A zero result scoped by _sourceCategory is ambiguous: the category name may
+// be wrong, or only the search terms matched nothing. Probe the category alone
+// over the same window so the hint fires only for the first case. A category
+// that once returned data stays known for a while, so baselines and repeated
+// searches don't probe again.
+async function categoryHasData(
+  client: Sumo.Client,
+  category: string,
+  options: SearchOptions,
+): Promise<boolean> {
+  const knownAt = knownCategories.get(category);
+  if (knownAt && Date.now() - knownAt < KNOWN_CATEGORY_TTL_MS) return true;
+
+  const probe = await runSearch(
+    client,
+    `_sourceCategory=${category} | limit 1`,
+    {
+      from: options.from,
+      to: options.to,
+      around: options.around,
+      aroundMinutes: options.aroundMinutes,
+      timeZone: options.timeZone,
+      byReceiptTime: options.byReceiptTime,
+      bySearchableTime: options.bySearchableTime,
+      limit: 1,
+      timeoutMs: PROBE_TIMEOUT_MS,
+    },
+  );
+  const found = probe.meta.totals.messages > 0;
+  if (found) knownCategories.set(category, Date.now());
+  return found;
+}
+
 export async function search(
+  client: Sumo.Client,
+  query: string,
+  options: SearchOptions = {},
+): Promise<SearchResult> {
+  const result = await runSearch(client, query, options);
+  const category = sourceCategoryOf(query);
+  if (result.meta.totals.messages > 0 || !category) return result;
+
+  const hasData = await categoryHasData(client, category, options).catch(
+    () => false,
+  );
+  if (!hasData) {
+    result.meta.hint = `Nothing matched _sourceCategory=${category}. If you expected data, check the name with sumologic_discover_sources; a wrong category also returns 0.`;
+  }
+  return result;
+}
+
+async function runSearch(
   client: Sumo.Client,
   query: string,
   options: SearchOptions = {},
@@ -733,12 +793,6 @@ export async function search(
         errors: [...new Set(errors)],
         elapsedMs: Date.now() - startedAt,
       };
-      const category = /_sourceCategory\s*=\s*("[^"]*"|[^\s|)]+)/i.exec(
-        query,
-      )?.[1];
-      if (messageCount === 0 && category) {
-        meta.hint = `Nothing matched _sourceCategory=${category}. If you expected data, check the name with sumologic_discover_sources; a wrong category also returns 0.`;
-      }
       const ui = searchUiLink(client.endpoint, query, fromMs, toMs);
       if (ui) {
         meta.links = { ui };
@@ -876,7 +930,7 @@ export async function search(
         messageCount,
       );
       if (narrowHalf !== undefined && narrowHalf < half) {
-        return search(client, query, {
+        return runSearch(client, query, {
           ...options,
           aroundMinutes: narrowHalf / 60000,
           narrowedFromMs: half,

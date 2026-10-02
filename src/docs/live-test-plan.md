@@ -134,13 +134,14 @@ Claude Code shows only the error text, not the `isError` flag itself. To see the
 
 ### B4. Timeline
 
-"Use sumologic_timeline on `_index=Production _sourceCategory=production/portal/* error`, from "-7d", bucket "6h". Give me total, firstSeen, lastSeen, peak. Then repeat for the last 3h grouped by \_sourceCategory with topGroups 5. Then run the first one again with `prod/portal/*` instead."
+"Use sumologic_timeline on `_index=Production _sourceCategory=production/portal/* error`, from "-7d", bucket "6h". Give me total, firstSeen, lastSeen, peak. Then repeat for the last 3h grouped by \_sourceCategory with topGroups 5. Then run the first one again with `prod/portal/*` instead. Then run it once more with `production/portal/*` and the term `\"zz-no-such-term-zz\"` in place of `error`."
 
 Pass if:
 
 - 29 zero filled buckets for 7 days at 6h (the first and last are partial), with real totals.
 - The grouped run returns 5 series plus an `(other: N groups)` series.
 - The `prod/portal/*` run returns 0 with `completeness: "complete"` and a `meta.hint` pointing to `sumologic_discover_sources`. Production categories are `production/portal/*`; `prod/portal/*` matches nothing.
+- (1.6.3) The `production/portal/*` run with the made up term returns 0 with **no** `hint`: the category has data, so only the term matched nothing.
 
 ### B5. Compare windows
 

@@ -124,7 +124,7 @@ Every `search_sumologic` response includes a `meta` object alongside the existin
   "state": "DONE GATHERING RESULTS",
   "totals":   { "messages": 5432, "records": 0 },   // what Sumo matched
   "totalsAreLowerBound": false,           // true when Sumo stopped counting at its cap
-  "hint": "...",                          // only when a _sourceCategory scoped search matched nothing
+  "hint": "...",                          // only when a _sourceCategory scoped search matched nothing and the category alone has no data in the window
   "returned": { "messages": 100,  "records": 0 },   // what this response carries
   "returnedSpan": { "newest": "2026-09-29T21:59:58.120Z", "oldest": "2026-09-29T21:59:41.003Z" }, // raw messages only
   "truncated": true,

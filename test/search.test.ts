@@ -617,6 +617,78 @@ test('hints at the source category when a scoped search finds nothing', async ()
   );
 });
 
+const probeRoutes = (categoryHasData: boolean | 'error') => {
+  const jobs: string[] = [];
+  const isProbe = (body: any) => / \| limit 1$/.test(body?.query ?? '');
+  const routes = jobRoutes({
+    status: (body) =>
+      isProbe(body) && categoryHasData === true
+        ? done({ messageCount: 1 })
+        : done(),
+    onJob: (body) => {
+      jobs.push(body.query);
+      if (isProbe(body) && categoryHasData === 'error') {
+        throw httpError(400, { message: 'bad probe' });
+      }
+    },
+  });
+  return { routes, jobs };
+};
+
+test('drops the hint when the category has data and only the terms matched nothing', async () => {
+  const { routes, jobs } = probeRoutes(true);
+  const { client } = fakeClient(routes);
+  const res = await search(
+    client,
+    '_sourceCategory=production/* "work pool full"',
+    { from: '-7d' },
+  );
+
+  assert.equal(res.meta.hint, undefined);
+  assert.equal(res.meta.totals.messages, 0);
+  assert.deepEqual(jobs, [
+    '_sourceCategory=production/* "work pool full"',
+    '_sourceCategory=production/* | limit 1',
+  ]);
+});
+
+test('keeps the hint when the category itself matches nothing', async () => {
+  const { routes, jobs } = probeRoutes(false);
+  const res = await search(
+    fakeClient(routes).client,
+    '_sourceCategory=prod/nothing/* error',
+  );
+
+  assert.match(
+    res.meta.hint!,
+    /Nothing matched _sourceCategory=prod\/nothing\/\*/,
+  );
+  assert.equal(jobs.length, 2, 'one search plus one probe');
+});
+
+test('probes a known good category only once per process', async () => {
+  const { routes, jobs } = probeRoutes(true);
+  const { client } = fakeClient(routes);
+  await search(client, '_sourceCategory=cached/cat/* "first"');
+  await search(client, '_sourceCategory=cached/cat/* "second"');
+
+  assert.equal(
+    jobs.filter((q) => q.endsWith('| limit 1')).length,
+    1,
+    'second search reuses the cached probe',
+  );
+});
+
+test('keeps the hint when the probe fails', async () => {
+  const { routes } = probeRoutes('error');
+  const res = await search(
+    fakeClient(routes).client,
+    '_sourceCategory=probe/fails/* error',
+  );
+
+  assert.match(res.meta.hint!, /sumologic_discover_sources/);
+});
+
 test('failed non-search calls say the call failed, not a search', () => {
   const err = new SumoSearchError('Permission denied.', 'forbidden');
   assert.match(formatToolError(err), /This search FAILED/);

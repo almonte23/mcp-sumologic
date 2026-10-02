@@ -13,7 +13,7 @@ import { SERVER_INSTRUCTIONS } from '@/instructions.js';
 import { aroundParams, EXTRA_TOOLS, registerExtraTools } from '@/tools.js';
 import { toJsonText } from '@/utils/json.js';
 
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 const ENABLED_TOOLS = ['search_sumologic', ...EXTRA_TOOLS];
 
 // Load environment variables from .env file
